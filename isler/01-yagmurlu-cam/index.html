@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DSC_4127</title>
+<style>
+html,body{margin:0;height:100%;background:#0b0b0c;overflow:hidden}
+body{display:flex;align-items:center;justify-content:center}
+canvas{display:block;max-width:100vw;max-height:100vh;width:auto;height:auto;object-fit:contain;opacity:0;transition:opacity 1.4s ease}
+canvas.ok{opacity:1}
+#b{position:fixed;left:50%;top:50%;width:120px;height:1px;margin-left:-60px;background:#222;transition:opacity .6s}
+#b i{display:block;height:1px;width:0;background:#777}
+#m{position:fixed;inset:0;display:none;align-items:center;justify-content:center;color:#888;font:14px/1.5 system-ui,sans-serif;padding:24px;text-align:center}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas><div id="b"><i></i></div><div id="m"></div>
+<script>
+'use strict';
+(async()=>{
+const Q=new URLSearchParams(location.hash.slice(1));
+const IMG_W=+(Q.get('w')||2880), IMG_H=Math.round(IMG_W*2/3);
+const SPP=+(Q.get('spp')||3000), ENV_N=2048, ENV_SPP=+(Q.get('espp')||160);
+const cv=document.getElementById('c'); cv.width=IMG_W; cv.height=IMG_H;
+const bar=document.querySelector('#b i');
+const say=t=>{const m=document.getElementById('m');m.textContent=t;m.style.display='flex';document.getElementById('b').style.display='none';window.__err=t};
+const gl=cv.getContext('webgl2',{alpha:false,antialias:false,preserveDrawingBuffer:true,powerPreference:'high-performance'});
+if(!gl||!gl.getExtension('EXT_color_buffer_float')){say('Bu kare WebGL2 ve kayan nokta doku desteği istiyor.');return}
+gl.getExtension('OES_texture_float_linear');
+const mc=new MessageChannel(),mq=[];mc.port1.onmessage=()=>mq.shift()();const tick=()=>new Promise(r=>{mq.push(r);mc.port2.postMessage(0)});
+
+/* ---------- küçük yardımcılar ---------- */
+function rng(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function sh(type,src){const s=gl.createShader(type);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){const l=gl.getShaderInfoLog(s);console.error(l);say('shader: '+l);throw l}return s}
+const VS='#version 300 es\nvoid main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.-1.,0.,1.);}';
+function prog(fs){const p=gl.createProgram();gl.attachShader(p,sh(gl.VERTEX_SHADER,VS));gl.attachShader(p,sh(gl.FRAGMENT_SHADER,'#version 300 es\nprecision highp float;precision highp int;precision highp sampler2D;\n'+fs));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS)){say('link: '+gl.getProgramInfoLog(p));throw 1}
+ const u={},n=gl.getProgramParameter(p,gl.ACTIVE_UNIFORMS);for(let i=0;i<n;i++){const a=gl.getActiveUniform(p,i).name.replace('[0]','');u[a]=gl.getUniformLocation(p,a)}return{p,u}}
+function tex(w,h,ifmt,fmt,type,data,filt,mip){const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texImage2D(gl.TEXTURE_2D,0,ifmt,w,h,0,fmt,type,data||null);
+ gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,filt||gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,mip?gl.LINEAR_MIPMAP_LINEAR:(filt||gl.NEAREST));gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);return t}
+function fbo(t){const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);return f}
+function bind(u,t,i){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,t);gl.uniform1i(u,i)}
+const px1=new Float32Array(4);
+const sync=()=>gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,px1);
+gl.bindVertexArray(gl.createVertexArray());
+
+/* ---------- 1. cadde: ışık haritası için sahne ---------- */
+const R=rng(90417);
+const B=[],S=[],T=[],L=[];
+const box=(cx,cy,cz,hx,hy,hz,mat,id,r,g,b,p)=>B.push([cx,cy,cz,mat,hx,hy,hz,id,r,g,b,p||0]);
+const bulb=(x,y,z,r,c,k)=>S.push([x,y,z,r,c[0]*k,c[1]*k,c[2]*k,0]);
+const lamp=(x,y,z,c,k,dx,dy,dz,sp)=>L.push([x,y,z,k,c[0],c[1],c[2],sp,dx,dy,dz,0]);
+const HW=13.2;
+{ // binalar
+ const pal=[[.36,.31,.25],[.26,.25,.25],[.42,.37,.30],[.30,.22,.18],[.24,.27,.29],[.45,.42,.38],[.33,.26,.22]];
+ let id=1;
+ for(const s of[-1,1]){let z=15;while(z<300){const w=9+R()*9,h=(s<0?12:13)+Math.floor(R()*3.2)*3.1+(z>120?R()*9:0),st=R()*.9,c=pal[Math.floor(R()*pal.length)];
+   box(s*(HW+st+8),h/2,z+w/2,8,h/2,w/2-.05,1,id++,c[0],c[1],c[2],h);
+   if(R()<.6)box(s*(HW+st+3),h+.8,z+w/2,1.6,.9,1.3,0,0,.12,.11,.11);
+   z+=w+(R()<.12?4:0)}}
+ for(const s of[-1,1]){let x=HW+16.5;while(x<120){const w=10+R()*9,h=13+Math.floor(R()*3)*3.1,c=pal[Math.floor(R()*pal.length)];
+   box(s*(x+w/2),h/2,15+9,w/2,h/2,9,1,id++,c[0],c[1],c[2],h);x+=w}}
+ box(0,11,340,60,11,6,1,id++,.2,.2,.22,22);
+ box(-21,20,372,7,20,7,1,id++,.2,.2,.22,40);
+}
+const WARM=[1,.60,.27],LEDC=[1,.80,.55],COLD=[.86,.95,1];
+for(let k=0;k<13;k++){const s=k%2?1:-1,z=22+k*21+R()*2,x=s*7.2,y=7.6,c=k%5==3?LEDC:WARM;
+ box(s*8.4,3.8,z,.07,3.8,.07,0,0,.05,.05,.05);box(s*7.8,7.65,z,.6,.04,.04,0,0,.05,.05,.05);
+ bulb(x,y,z,.17,c,34);lamp(x,y-.1,z,c,60,0,-1,0,1.2)}
+// araçlar
+function car(x,z,dir,col,on,brake){ // dir +1: uzaklaşıyor, -1: yaklaşıyor
+ const tall=R()<.25?.25:0,hc=[[.86,.94,1],[1,.97,.92],[1,.87,.68]][Math.floor(R()*3)];
+ box(x,.62,z,.88,.36,2.15,2,0,col[0],col[1],col[2]);box(x,1.18+tall/2,z-.1*dir,.74,.30+tall/2,1.15,3,0,.03,.03,.035);
+ for(const a of[-.58,.58]){
+  if(on){const zr=z-dir*2.18,zf=z+dir*2.18;
+   box(x+a,.80,zr,.20,.075,.03,4,0,...(brake?[26,.9,.35]:[9,.3,.12]));
+   if(dir<0){bulb(x+a,.68,zf,.105,hc,105);lamp(x+a,.7,zf-.15,hc,75,(a>0?.03:-.03),-.06,-1,26)}
+   else lamp(x+a,.7,zf+.15,COLD,50,0,-.06,1,26)}
+ }
+ if(on&&dir>0&&brake)box(x,1.52+tall,z-1.05,.18,.02,.02,4,0,26,1,.6);
+}
+const cc=[[.02,.02,.025],[.35,.35,.36],[.5,.5,.5],[.09,.02,.02],[.03,.05,.1],[.12,.12,.13],[.55,.38,.03]];
+const pc=()=>cc[Math.floor(R()*cc.length)];
+[[-2.1,31],[-2.0,44],[-5.0,38.5],[-2.2,63],[-5.1,71],[-2,88],[-2.1,104],[-5,118],[-2,139],[-2,166],[-5,190]].forEach(a=>car(a[0]+R()*.3,a[1],-1,pc(),true,false));
+[[2.0,27.5,1],[5.0,33,0],[2.1,49,1],[2.0,57,1],[5.1,62,0],[2.0,79,0],[5.1,92,1],[2,112,0],[2,131,0],[5,150,1],[2,180,0]].forEach(a=>car(a[0]+R()*.3,a[1],1,pc(),true,!!a[2]));
+for(let z=20;z<150;z+=5.6){if(R()<.7)car(-7.6,z+R(),1,pc(),false);if(R()<.7)car(7.6,z+R(),1,pc(),false)}
+// trafik ışıkları
+function tl(x,y,z,c,k){box(x,y/2,z,.06,y/2,.06,0,0,.04,.04,.04);box(x,y,z+.12,.17,.5,.1,0,0,.02,.02,.02);bulb(x,y+(c[0]>.5?.28:-.28),z,.115,c,k)}
+tl(6.6,3.3,60,[1,.06,.03],95);tl(-6.4,3.3,61,[.1,1,.55],42);tl(0.2,5.4,61,[1,.06,.03],80);tl(6.7,3.2,112,[.1,1,.5],50);
+// ağaçlar
+for(const s of[-1,1])for(let z=25;z<230;z+=12+R()*9){if(R()<.18)continue;const x=s*(10.4+R()*.6),h=5.4+R()*2.2;
+ box(x,h/2-.6,z,.13,h/2-.6,.13,0,0,.035,.03,.025);
+ const n=4+Math.floor(R()*3);for(let i=0;i<n;i++)T.push([x+(R()-.5)*2.6,h+(R()-.45)*2.6,z+(R()-.5)*2.6,1.0+R()*1.0])}
+// caddeye gerilmiş ampuller
+for(const z of[46,83]){const nb=z<60?11:13;for(let i=0;i<=nb;i++){const t=(i+(R()-.5)*.5)/nb,x=-HW+.4+t*(2*HW-.8),y=9.4-2.0*Math.sin(Math.PI*t)+(R()-.5)*.5;if(R()<.80)bulb(x,y,z+R()*.6,.062,[1,.60+R()*.1,.24+R()*.14],7+R()*R()*38)}}
+// uzaktaki şehir
+for(let i=0;i<46;i++)bulb((R()-.5)*150,14+R()*26,390+R()*200,.35+R()*.35,R()<.75?WARM:(R()<.5?COLD:[1,.2,.1]),30+R()*40);
+
+const boxD=new Float32Array(B.length*12);B.forEach((b,i)=>boxD.set(b,i*12));
+const sphD=new Float32Array(S.length*8);S.forEach((b,i)=>sphD.set(b,i*8));
+const treD=new Float32Array(T.length*4);T.forEach((b,i)=>treD.set(b,i*4));
+const lmpD=new Float32Array(L.length*12);L.forEach((b,i)=>lmpD.set(b,i*12));
+const tBox=tex(3,B.length,gl.RGBA32F,gl.RGBA,gl.FLOAT,boxD),tSph=tex(2,S.length,gl.RGBA32F,gl.RGBA,gl.FLOAT,sphD),tTre=tex(1,T.length,gl.RGBA32F,gl.RGBA,gl.FLOAT,treD),tLmp=tex(3,L.length,gl.RGBA32F,gl.RGBA,gl.FLOAT,lmpD);
+
+const ENV_FS=`
+uniform sampler2D uPrev,uBox,uSph,uTre,uLmp;uniform int uN;uniform ivec4 uCnt;uniform float uYaw;out vec4 o;
+uint st;float rnd(){st=st*747796405u+2891336453u;uint w=((st>>((st>>28u)+4u))^st)*277803737u;w=(w>>22u)^w;return float(w)*2.3283064e-10;}
+float h1(float n){return fract(sin(n*12.9898)*43758.547);}
+float h2(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
+float h3(vec3 p){p=fract(p*.1031);p+=dot(p,p.zyx+31.32);return fract((p.x+p.y)*p.z);}
+float n2(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(h2(i),h2(i+vec2(1,0)),f.x),mix(h2(i+vec2(0,1)),h2(i+vec2(1,1)),f.x),f.y);}
+float n3(vec3 p){vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(mix(h3(i),h3(i+vec3(1,0,0)),f.x),mix(h3(i+vec3(0,1,0)),h3(i+vec3(1,1,0)),f.x),f.y),mix(mix(h3(i+vec3(0,0,1)),h3(i+vec3(1,0,1)),f.x),mix(h3(i+vec3(0,1,1)),h3(i+vec3(1,1,1)),f.x),f.y),f.z);}
+float fbm(vec2 p){float a=.5,s=0.;for(int i=0;i<5;i++){s+=a*n2(p);p=p*2.03+17.1;a*=.5;}return s;}
+vec3 sky(vec3 d){
+ float e=max(d.y,0.);
+ vec3 c=mix(vec3(.25,.315,.42),vec3(.085,.165,.325),smoothstep(0.,.40,e));
+ c=mix(c,vec3(.045,.095,.215),smoothstep(.3,1.,e));
+ float az=d.x/max(d.z,.15);
+ c+=vec3(.20,.095,.035)*exp(-e*8.)*exp(-az*az*3.);
+ vec2 q=d.xz/(e+.18);float f=fbm(q*1.1+vec2(3.,9.))*.65+fbm(q*3.1)*.35;
+ c*=mix(.72,1.22,smoothstep(.25,.75,f));
+ return c*.80;}
+struct H{float t;vec3 n;int k;int i;};
+void isect(vec3 ro,vec3 rd,inout H h,bool lights){
+ vec3 iv=1./rd;
+ if(rd.y<0.){float t=-ro.y/rd.y;if(t<h.t){h.t=t;h.n=vec3(0,1,0);h.k=1;}}
+ for(int i=0;i<uCnt.x;i++){vec4 a=texelFetch(uBox,ivec2(0,i),0);vec3 b=texelFetch(uBox,ivec2(1,i),0).xyz;
+  vec3 m=iv*(ro-a.xyz),k=abs(iv)*b,t1=-m-k,t2=-m+k;float tn=max(max(t1.x,t1.y),t1.z),tf=min(min(t2.x,t2.y),t2.z);
+  if(tn<tf&&tn>1e-3&&tn<h.t){h.t=tn;h.n=-sign(rd)*step(t1.yzx,t1.xyz)*step(t1.zxy,t1.xyz);h.k=2;h.i=i;}}
+ if(lights)for(int i=0;i<uCnt.y;i++){vec4 a=texelFetch(uSph,ivec2(0,i),0);vec3 oc=ro-a.xyz;float b=dot(oc,rd),c=dot(oc,oc)-a.w*a.w,q=b*b-c;if(q>0.){float t=-b-sqrt(q);if(t>1e-3&&t<h.t){h.t=t;h.n=normalize(oc+rd*t);h.k=3;h.i=i;}}}
+ for(int i=0;i<uCnt.z;i++){vec4 a=texelFetch(uTre,ivec2(0,i),0);vec3 oc=ro-a.xyz;float b=dot(oc,rd),c=dot(oc,oc)-a.w*a.w,q=b*b-c;if(q<=0.)continue;q=sqrt(q);float t0=max(-b-q,0.),t1=-b+q;if(t1<=0.||t0>h.t)continue;
+  float t=t0;for(int j=0;j<4;j++){t-=log(1.-rnd())*.42;if(t>t1||t>h.t)break;vec3 P=ro+rd*t;float r=length(P-a.xyz)/a.w;if(n3(P*2.3)*.75+n3(P*6.1)*.35>.50+.22*r*r){h.t=t;h.n=normalize(vec3(rnd(),rnd(),rnd())-.5+vec3(0,.25,0));h.k=4;break;}}}
+}
+vec3 cosd(vec3 n){float a=6.2831853*rnd(),u=2.*rnd()-1.;return normalize(n+vec3(sqrt(max(0.,1.-u*u))*vec2(cos(a),sin(a)),u)*.9999);}
+vec3 gs(){float a=6.2831853*rnd(),r=sqrt(-2.*log(1.-rnd()));float b=6.2831853*rnd(),q=sqrt(-2.*log(1.-rnd()));return vec3(r*cos(a),r*sin(a),q*cos(b));}
+vec3 tone(float h){return h<.62?vec3(1.,.69,.38):h<.82?vec3(1.,.84,.62):h<.9?vec3(.85,.94,1.):h<.95?vec3(1.,.36,.22):vec3(.4,.85,.75);}
+void facade(vec3 P,vec3 n,float id,vec3 base,float top,out vec3 alb,out vec3 em,out float sp){
+ float u=(abs(n.x)>.5?P.z:P.x)+id*7.31,v=P.y;alb=base*(.7+.45*n2(vec2(u*.5,v*.35)))*(.82+.18*n2(vec2(u*5.,v*.6)));em=vec3(0);sp=0.;
+ if(v>top-.7){alb*=1.15;return;}
+ if(v<4.3){float w=4.6+2.6*h1(id),si=floor(u/w),f=fract(u/w);float a=h2(vec2(si,id)),b=h2(vec2(id,si+5.)),c=h2(vec2(si+9.,id+3.));
+  alb=base*.35;
+  if(f>.035&&f<.965){
+   if(v>.45&&v<3.15){float ml=step(.02,abs(fract(f*3.)-.5)-.0)*step(.03,fract(f*3.));
+     if(a>.2){float it=n2(vec2(u*3.1,v*2.2)+id)*.7+n2(vec2(u*9.,v*7.))*.4;float grad=mix(.45,1.3,smoothstep(.4,3.1,v));em=tone(b)*(.55+2.0*c*c)*grad*mix(.25,1.15,smoothstep(.15,.85,it))*mix(.2,1.,ml);}
+     alb=vec3(.03);sp=1.;}
+   else if(v>3.3&&v<4.05&&c>.3){float tx=step(.42,n2(vec2(u*5.,floor(v*5.)*3.+si)))*step(.12,f)*step(f,.88);vec3 sc=h1(a*91.)<.4?vec3(1.,.93,.82):h1(a*91.)<.62?vec3(1.,.13,.08):h1(a*91.)<.75?vec3(.15,.75,.45):h1(a*91.)<.88?vec3(1.,.62,.18):vec3(.25,.5,1.);em=sc*(.25+3.2*tx)*step(.35,a);}
+  }return;}
+ float fh=3.1,fl=floor((v-4.3)/fh),fv=fract((v-4.3)/fh),cw=2.1+1.2*h1(id*3.7),ci=floor(u/cw),fu=fract(u/cw);
+ if(fv<.07){alb*=1.25;return;}
+ float ww=.17+.1*h1(id*1.9);
+ if(fu>ww&&fu<1.-ww&&fv>.27&&fv<.83){
+  float fx=(fu-ww)/(1.-2.*ww);
+  if(abs(fx-.5)<.03||fx<.04||fx>.96||fv<.295||fv>.805){alb=vec3(.4);return;}
+  float q=h2(vec2(ci+id*13.,fl+id));alb=vec3(.025);sp=1.;
+  if(q<.36){float c=h2(vec2(fl*3.+id,ci));float cur=.55+.45*n2(vec2(u*11.,fl));float side=smoothstep(.0,.3,abs(fx-.5)-.12);vec3 wc=c<.7?vec3(1.,.66,.34):c<.9?vec3(1.,.85,.63):vec3(.72,.85,1.);
+    em=wc*(.18+1.15*c*q/.36)*mix(1.,.55*cur,side)*mix(.6,1.1,fv);sp=.6;}
+ }
+}
+vec3 direct(vec3 P,vec3 n){
+ float f=rnd()*float(uCnt.w);int i=min(int(f),uCnt.w-1);vec4 a=texelFetch(uLmp,ivec2(0,i),0),c=texelFetch(uLmp,ivec2(1,i),0);vec3 dl=normalize(texelFetch(uLmp,ivec2(2,i),0).xyz);
+ vec3 v=a.xyz-P;float d2=dot(v,v),d=sqrt(d2);v/=d;float cs=dot(n,v);if(cs<=0.)return vec3(0);
+ float sp=pow(max(dot(-v,dl),0.),c.w)+.02;float k=a.w*sp*cs/max(d2,.4)*float(uCnt.w);if(k<.004*float(uCnt.w)&&rnd()>.25)return vec3(0);
+ H h;h.t=d-.25;h.k=0;isect(P+n*.01,v,h,false);if(h.k!=0)return vec3(0);
+ return c.xyz*k*.3183;}
+vec3 fogc(vec3 d){return vec3(.105,.135,.19)+vec3(.10,.055,.02)*exp(-abs(d.y)*8.);}
+void main(){
+ ivec2 ip=ivec2(gl_FragCoord.xy);vec4 pv=texelFetch(uPrev,ip,0);
+ st=uint(ip.x)*1973u+uint(ip.y)*9277u*4096u+uint(uN)*26699u+17u;rnd();rnd();
+ vec2 p=((vec2(ip)+vec2(rnd(),rnd()))/float(${ENV_N})*2.-1.)*1.5;float r2=dot(p,p);
+ if(r2>2.2){o=pv+vec4(.02,.02,.022,1);return;}
+ vec3 d=vec3(p*sqrt(1.-r2*.25),1.-r2*.5);float cy=cos(uYaw),sy=sin(uYaw);d=vec3(cy*d.x-sy*d.z,d.y,sy*d.x+cy*d.z);
+ if(abs(d.x)<1e-5)d.x=1e-5;if(abs(d.y)<1e-5)d.y=1e-5;if(abs(d.z)<1e-5)d.z=1e-5;
+ vec3 ro=vec3(-1.3,6.6,0.),rd=d,L=vec3(0),th=vec3(1);bool spec=true;
+ for(int b=0;b<4;b++){
+  H h;h.t=1e5;h.k=0;h.i=0;isect(ro,rd,h,spec);
+  float t=min(h.t,900.),tr=h.k==0?mix(.35,1.,smoothstep(0.,.22,rd.y)):exp(-t*.0020);
+  if(b==0||spec){
+   // ışıkların yağmurlu havada halesi
+   vec3 hal=vec3(0);for(int i=0;i<uCnt.w;i++){vec4 a=texelFetch(uLmp,ivec2(0,i),0);vec3 c=texelFetch(uLmp,ivec2(1,i),0).xyz;vec3 oc=a.xyz-ro;float s=dot(oc,rd);vec3 q=oc-rd*s;float D=max(length(q),.12);hal+=c*a.w*(atan((t-s)/D)-atan(-s/D))/D;}
+   L+=th*hal*.00006;}
+  L+=th*(1.-tr)*fogc(rd);th*=tr;
+  if(h.k==0){L+=th*sky(rd);break;}
+  vec3 P=ro+rd*h.t,n=h.n,alb=vec3(.1),em=vec3(0);float sp=0.,rough=0.;
+  if(h.k==3){L+=th*texelFetch(uSph,ivec2(1,h.i),0).xyz;break;}
+  if(h.k==4){alb=vec3(.035,.045,.02);if(dot(n,rd)>0.)n=-n;}
+  if(h.k==1){float ax=abs(P.x);float nz=fbm(P.xz*.6),fine=n2(P.xz*9.);
+   alb=vec3(.045)*(.7+.6*nz);rough=mix(.022,.085,smoothstep(.35,.62,nz))+.03*fine;sp=1.;
+   if(P.z>14.5){if(ax>9.2){alb=vec3(.13,.125,.12)*(.8+.4*fine);rough+=.05;float jx=fract(P.x*1.6),jz=fract(P.z*1.6);if(jx<.04||jz<.04)alb*=.6;}
+    else if(ax<.09||(abs(ax-3.5)<.07&&fract(P.z/6.)<.45))alb=vec3(.45);}
+   else{if(P.z>9.&&P.z<13.&&ax<9.&&fract(P.x/1.1)<.5)alb=vec3(.5);}
+  }
+  if(h.k==2){vec4 a=texelFetch(uBox,ivec2(0,h.i),0),bb=texelFetch(uBox,ivec2(1,h.i),0),c=texelFetch(uBox,ivec2(2,h.i),0);
+   if(a.w==4.){L+=th*c.rgb*(b==0||spec?1.:.3);break;}
+   alb=c.rgb;if(a.w==1.){if(abs(n.y)<.5)facade(P,n,bb.w,c.rgb,c.w,alb,em,sp);else alb=vec3(.08);}
+   if(a.w==2.){sp=1.;rough=.03;}if(a.w==3.){sp=1.;rough=.01;}}
+  L+=th*em;
+  ro=P+n*.004;
+  if(sp>0.){float c=clamp(dot(-rd,n),0.,1.);float F=(.03+.97*pow(1.-c,5.))*sp;if(h.k==1)F=F*.9;
+   if(rnd()<F){vec3 m=normalize(n+gs()*rough*vec3(1.,0.,1.));rd=reflect(rd,m);if(dot(rd,n)<.0)rd=reflect(rd,n);spec=true;continue;}}
+  th*=alb;L+=th*direct(P+n*.01,n);
+  if(b>1&&max(th.x,max(th.y,th.z))<.02)break;
+  rd=cosd(n);spec=false;
+  if(abs(rd.x)<1e-5)rd.x=1e-5;if(abs(rd.y)<1e-5)rd.y=1e-5;if(abs(rd.z)<1e-5)rd.z=1e-5;
+ }
+ L=min(L,vec3(400.));o=pv+vec4(any(isnan(L))?vec3(0):L,1.);
+}`;
+
+/* ---------- 2. camdaki yağmur ---------- */
+const GW=133,GH=94,GX=-60,GY=-47,TW=4096,TH=Math.round(TW*GH/GW),TX=GW/TW; // mm
+function makeDrops(){
+ const r=rng(+(Q.get('seed')||341)),gauss=()=>{let u=0;while(u===0)u=r();return Math.sqrt(-2*Math.log(u))*Math.cos(6.2831853*r())};
+ const CS=3.2,nx=Math.ceil((GW+20)/CS),ny=Math.ceil((GH+90)/CS),grid=Array.from({length:nx*ny},()=>new Set());
+ const ox=GX-10,oy=GY-20; // ızgara alanı: y, GY-20 .. GY+GH+70 (yukarı +)
+ const cell=(x,y)=>{const i=Math.max(0,Math.min(nx-1,Math.floor((x-ox)/CS))),j=Math.max(0,Math.min(ny-1,Math.floor((y-oy)/CS)));return j*nx+i};
+ const add=d=>{d.k=cell(d.x,d.y);grid[d.k].add(d)},rem=d=>{grid[d.k].delete(d);d.dead=true};
+ const move=d=>{const k=cell(d.x,d.y);if(k!==d.k){grid[d.k].delete(d);d.k=k;grid[k].add(d)}};
+ const ext=d=>{let m=0;for(const c of d.c)m=Math.max(m,Math.hypot(c[0],c[1])+c[2]);d.e=m;return m};
+ const near=(x,y,rad,f)=>{const reach=rad+4.6,i0=Math.max(0,Math.floor((x-reach-ox)/CS)),i1=Math.min(nx-1,Math.floor((x+reach-ox)/CS)),j0=Math.max(0,Math.floor((y-reach-oy)/CS)),j1=Math.min(ny-1,Math.floor((y+reach-oy)/CS));for(let j=j0;j<=j1;j++)for(let i=i0;i<=i1;i++)for(const d of grid[j*nx+i])f(d)};
+ const touch=(d,x,y,rr)=>{const dx=x-d.x,dy=y-d.y;if(dx*dx+dy*dy>(d.e+rr)*(d.e+rr))return false;for(const c of d.c){const a=dx-c[0],b=dy-c[1],s=c[2]+rr*.96;if(a*a+b*b<s*s)return true}return false};
+ const newDrop=(x,y,rad)=>({x,y,V:rad*rad*rad,c:[[0,0,rad]],e:rad,crit:2.35+gauss()*.4,th:(41+gauss()*5)*Math.PI/180,tail:0,s:Math.floor(r()*1e6)});
+ function unionArea(c){let x0=9e9,x1=-9e9,y0=9e9,y1=-9e9;for(const k of c){x0=Math.min(x0,k[0]-k[2]);x1=Math.max(x1,k[0]+k[2]);y0=Math.min(y0,k[1]-k[2]);y1=Math.max(y1,k[1]+k[2])}
+  const n=20,sx=(x1-x0)/n,sy=(y1-y0)/n;let a=0;for(let j=0;j<n;j++)for(let i=0;i<n;i++){const x=x0+(i+.5)*sx,y=y0+(j+.5)*sy;for(const k of c){const p=x-k[0],q=y-k[1];if(p*p+q*q<k[2]*k[2]){a++;break}}}return a*sx*sy}
+ function relax(d,pull){const Rq=Math.cbrt(d.V);for(const c of d.c){c[0]*=pull;c[1]*=pull}
+  d.c.sort((a,b)=>b[2]-a[2]);const keep=[];for(const c of d.c){if(keep.some(k=>Math.hypot(k[0]-c[0],k[1]-c[1])+c[2]<k[2]*1.02))continue;keep.push(c);if(keep.length>=6)break}d.c=keep;
+  const tgt=Math.PI*Rq*Rq*1.12,f=Math.sqrt(tgt/unionArea(d.c));for(const c of d.c){c[2]*=f;c[0]*=Math.sqrt(f);c[1]*=Math.sqrt(f)}ext(d)}
+ function absorb(a,b,pull){const V=a.V+b.V,wx=(a.x*a.V+b.x*b.V)/V,wy=(a.y*a.V+b.y*b.V)/V;
+  const cs=[];for(const c of a.c)cs.push([a.x+c[0]-wx,a.y+c[1]-wy,c[2]]);for(const c of b.c)cs.push([b.x+c[0]-wx,b.y+c[1]-wy,c[2]]);
+  a.c=cs;a.x=wx;a.y=wy;a.V=V;a.crit=Math.max(a.crit,b.crit)*.5+Math.min(a.crit,b.crit)*.5;rem(b);relax(a,pull);move(a)}
+ function settle(a){for(let it=0;it<12;it++){let hit=null;near(a.x,a.y,a.e,d=>{if(hit||d===a||d.dead)return;for(const c of a.c)if(touch(d,a.x+c[0],a.y+c[1],c[2]*.97)){hit=d;break}});if(!hit)break;const ratio=Math.min(a.V,hit.V)/Math.max(a.V,hit.V);absorb(a,hit,ratio<.04?1:(a.V<.4?.62:.80))}
+  if(!a.run&&Math.cbrt(a.V)>a.crit)slide(a)}
+ const paths=[];let time=0;
+ function slide(a,riv){
+  a.run=true;let vx=0,next=.6+r()*1.5,dist=0;const pth=[];let R0=Math.cbrt(a.V);const wob=.05+r()*.07,stop0=a.crit*(.72+r()*.16);
+  while(a.y>GY-16){
+   const Rq=Math.cbrt(a.V),st=Math.max(.18,Rq*.16);vx=vx*.9+gauss()*wob;vx=Math.max(-.8,Math.min(.8,vx));
+   a.y-=st;a.x+=vx*st;a.c=[[0,0,Rq]];ext(a);move(a);dist+=st;pth.push([a.x,a.y,Rq,dist]);
+   let hit;do{hit=null;near(a.x,a.y,Rq,d=>{if(!hit&&d!==a&&!d.dead&&touch(d,a.x,a.y,Rq*.98))hit=d});if(hit){a.V+=hit.V;const w=hit.V/a.V;a.x+=(hit.x-a.x)*Math.min(.35,w);rem(hit)}}while(hit);
+   a.V-=st*Rq*Rq*(riv?.008:.020);if(riv&&a.y<riv)break;
+   if(!riv&&dist>next&&Rq>.7){const br=Rq*(.07+r()*r()*.21);next=dist+br*1.6+Rq*(.12+r()*.55);a.V-=br*br*br;
+     const b=newDrop(a.x+gauss()*Rq*.13-vx*.3,a.y+Rq*(1.05+r()*.3),br);const el=r();b.c=[[0,0,br]];if(el>.35)b.c.push([gauss()*.1*br,br*(.5+r()*.7),br*(.5+r()*.35)]);if(el>.75)b.c.push([gauss()*.1*br,br*(1.3+r()*.8),br*.45]);b.th*=.8;ext(b);b.bead=1;add(b)}
+   if(!riv&&Rq<stop0&&r()<.10)break;if(Rq<1.0)break;
+  }
+  a.run=false;paths.push({p:pth,t:time});
+  if(a.y<=GY-15){rem(a);return}
+  // durmuş damla: önde dolgun, arkada incelen kuyruk
+  const Rq=Math.cbrt(a.V),cs=[[0,0,Rq*.93]],L=.5+r()*1.5;let hx=0;for(let k=1;k<=(riv?0:4);k++){const f=k/4;hx+=gauss()*.06*Rq-vx*.12*Rq;cs.push([hx,Rq*(.35+L*f*1.15),Rq*(.84-.62*f)])}
+  if(riv){const n=pth.length,len=a.len||30;let acc=0,rr0=.3;for(let i=n-1;i>=0;i--){const q=pth[i];const dd=dist-q[3];if(dd<Rq*.12)continue;if(dd>len)break;if(dist-q[3]-acc<(dist-q[3]>len*.30?.55+rr0*2.6:.16))continue;acc=dist-q[3];const f=acc/len;const pin=f<.30?.08+f*.4:.35;const z=acc/Rq,base=Rq*(.80*Math.exp(-z*z*.34)+.145*(1-f*.45));const rr=base*(1+pin*Math.min(1,Math.max(0,z-1.8))*Math.sin(acc*1.5+a.s));if(rr<.085)continue;rr0=.2+r()*r()*.9;
+     if(f>.30){const b=newDrop(q[0],q[1],rr*.9);b.th*=.75;b.c=[[0,0,rr*.85],[gauss()*.03,rr*.7,rr*.6]];ext(b);if(f<.45||r()<.75-f*.5)add(b);continue}
+     cs.push([q[0]-a.x,q[1]-a.y,rr,1])}}
+  a.c=cs;ext(a);a.tail=1;a.crit=Math.max(a.crit,Rq*1.1);
+ }
+ const impact=(x,y,rad)=>{let first=null;const list=[];near(x,y,rad,d=>{if(!d.dead&&touch(d,x,y,rad))list.push(d)});const n=newDrop(x,y,rad);add(n);
+   if(list.length){list.sort((a,b)=>b.V-a.V);let a=list[0];if(a.V<n.V)a=n;for(const b of [n,...list])if(b!==a&&!b.dead)absorb(a,b,Math.min(a.V,b.V)/Math.max(a.V,b.V)<.04?1:(a.V<.4?.62:.82));settle(a)}};
+ const NI=+(Q.get('ni')||95000);
+ for(let i=0;i<NI;i++){time=i/NI;const u=r();let rad=.13*Math.pow(1-u*.9992,-1/2.2);rad=Math.min(rad,1.9);
+  impact(GX-8+r()*(GW+16),GY-18+r()*(GH+80),rad)}
+ for(const f of [[-27,46,3.0,-9,34],[33,60,2.7,6,26]]){time=1;const d=newDrop(f[0],f[1],f[2]);d.len=f[4];add(d);slide(d,f[3])}
+ const all=[];for(const g of grid)for(const d of g)if(!d.dead)all.push(d);
+ return{all,paths,r,gauss};
+}
+async function rasterDrops(sim){
+ const {all,paths,r,gauss}=sim;
+ const D=new Float32Array(TW*TH*4);for(let i=0;i<TW*TH;i++)D[i*4]=-1;
+ // değer gürültüsü
+ const N=256,tab=new Float32Array(N*N);for(let i=0;i<N*N;i++)tab[i]=r()*2-1;
+ const vn=(x,y)=>{const xi=Math.floor(x),yi=Math.floor(y);let fx=x-xi,fy=y-yi;fx=fx*fx*(3-2*fx);fy=fy*fy*(3-2*fy);const a=tab[(yi&255)*N+(xi&255)],b=tab[(yi&255)*N+((xi+1)&255)],c=tab[((yi+1)&255)*N+(xi&255)],d=tab[((yi+1)&255)*N+((xi+1)&255)];return a+(b-a)*fx+(c-a)*fy+(a-b-c+d)*fx*fy};
+ let last=performance.now();
+ for(let di=0;di<all.length;di++){
+  const d=all[di],Rq=Math.cbrt(d.V);
+  if(d.x+d.e<GX||d.x-d.e>GX+GW||d.y+d.e<GY||d.y-d.e>GY+GH)continue;
+  let bx0=9e9,bx1=-9e9,by0=9e9,by1=-9e9;for(const c of d.c){bx0=Math.min(bx0,c[0]-c[2]);bx1=Math.max(bx1,c[0]+c[2]);by0=Math.min(by0,c[1]-c[2]);by1=Math.max(by1,c[1]+c[2])}
+  const m=Rq*.32+.15;const i0=Math.max(1,Math.floor((d.x+bx0-m-GX)/TX)),i1=Math.min(TW-2,Math.ceil((d.x+bx1+m-GX)/TX)),j0=Math.max(1,Math.floor((d.y+by0-m-GY)/TX)),j1=Math.min(TH-2,Math.ceil((d.y+by1+m-GY)/TX));
+  const w=i1-i0+1,h=j1-j0+1;if(w<3||h<3)continue;
+  const sd=new Float32Array(w*h),u=new Float32Array(w*h);
+  const wf=1/(Rq*1.15),wa=Rq*(Rq>.5?.115:.07),wf2=1/(Rq*.42),wa2=Rq*(Rq>.5?.018:.01),so=d.s*.37;
+  for(let j=0;j<h;j++)for(let i=0;i<w;i++){
+   let x=GX+(i0+i+.5)*TX-d.x,y=GY+(j0+j+.5)*TX-d.y;
+   const nx=vn(x*wf+so,y*wf+so*1.7)*wa+vn(x*wf2+so*2.1,y*wf2)*wa2,ny=vn(x*wf+so*3.1+50,y*wf-so)*wa+vn(x*wf2-so,y*wf2+so+9)*wa2;
+   x+=nx;y+=ny;let s=1e9;
+   for(const c of d.c){const dy=y-c[1];if(c[3]&&(dy>2.2||dy<-2.2))continue;const q=Math.hypot(x-c[0],dy)-c[2],k=c[3]?.12:Math.max(.08,c[2]*.75);if(s>1e8)s=q;else{const hh=Math.max(k-Math.abs(s-q),0)/k;s=Math.min(s,q)-hh*hh*k*.25}}
+   sd[j*w+i]=s;}
+  // Poisson: zar denklemi, temas çizgisi sıfır yükseklik
+  let mi=0;for(let k=0;k<w*h;k++)if(-sd[k]>mi)mi=-sd[k];const ND=Math.max(5,2*mi/TX+2),om=2/(1+Math.sin(Math.PI/ND));const its=Math.max(14,Math.min(420,Math.round(ND*1.9)));
+  const g=Math.min(.42,.16*Rq);
+  // Dirichlet kesirleri
+  const cells=[];for(let j=1;j<h-1;j++)for(let i=1;i<w-1;i++){const k=j*w+i;if(sd[k]<0)cells.push(k)}
+  const M=cells.length;if(M<2){ // çok küçük
+    const a=Math.max(1,M);const k0=(Math.floor((d.y-GY)/TX))*TW+Math.floor((d.x-GX)/TX);if(k0>=0&&k0<TW*TH)D[k0*4]=Math.max(D[k0*4],.01);continue}
+  const aW=new Float32Array(M),aE=new Float32Array(M),aS=new Float32Array(M),aN=new Float32Array(M),dg=new Float32Array(M),sr=new Float32Array(M);
+  for(let q=0;q<M;q++){const k=cells[q],s=sd[k];const fr=n=>sd[n]<0?1:Math.max(.08,s/(s-sd[n]));const hw=fr(k-1),he=fr(k+1),hs=fr(k-w),hn=fr(k+w);
+   aW[q]=sd[k-1]<0?2/(hw*(hw+he)):0;aE[q]=sd[k+1]<0?2/(he*(hw+he)):0;aS[q]=sd[k-w]<0?2/(hs*(hs+hn)):0;aN[q]=sd[k+w]<0?2/(hn*(hs+hn)):0;dg[q]=1/(2/(hw*he)+2/(hs*hn));
+   const y=(GY+(j0+Math.floor(k/w)+.5)*TX-d.y)/Math.max(Rq,.1);sr[q]=TX*TX*Math.max(.3,1-g*y);u[k]=Math.min(s*s,-s*Rq*.5)}
+  for(let it=0;it<its;it++)for(let c=0;c<2;c++)for(let q=0;q<M;q++){const k=cells[q];if(((k%w)+Math.floor(k/w)&1)!==c)continue;
+   const v=(aW[q]*u[k-1]+aE[q]*u[k+1]+aS[q]*u[k-w]+aN[q]*u[k+w]+sr[q])*dg[q];u[k]+=(v-u[k])*om}
+  let um=0;for(let q=0;q<M;q++)if(u[cells[q]]>um)um=u[cells[q]];
+  const Re=2*Math.sqrt(um)||Rq,cc=Re/Math.tan(d.th);
+  const H=new Float32Array(w*h).fill(-1);
+  for(let q=0;q<M;q++){const k=cells[q];H[k]=Math.sqrt(cc*cc+4*u[k])-cc}
+  // sınır dışına doğrusal uzat (alt piksel kenar için)
+  for(let pass=0;pass<2;pass++){const up=[];for(let j=1;j<h-1;j++)for(let i=1;i<w-1;i++){const k=j*w+i;if(H[k]>-1)continue;let a=0,b=0;for(const n of[k-1,k+1,k-w,k+w,k-w-1,k-w+1,k+w-1,k+w+1]){if(H[n]>-1&&sd[n]<-1e-4){const e=H[n]/-sd[n];a+=Math.min(e,2);b++}else if(pass&&H[n]>-1&&sd[n]>1e-4){a+=Math.min(2,H[n]/-sd[n]);b++}}if(b)up.push([k,-Math.max(sd[k],1e-4)*a/b])}for(const e of up)H[e[0]]=Math.max(-.99,e[1])}
+  for(let j=1;j<h-1;j++)for(let i=1;i<w-1;i++){const k=j*w+i;if(H[k]<=-1)continue;const G=((j0+j)*TW+i0+i)*4;if(H[k]<=D[G])continue;
+   const hc=H[k];const v=n=>H[n]>-1?H[n]:null;let l=v(k-1),rr=v(k+1),b=v(k-w),t=v(k+w);let gx=l!==null&&rr!==null?(rr-l)/2:l!==null?hc-l:rr!==null?rr-hc:0,gy=b!==null&&t!==null?(t-b)/2:b!==null?hc-b:t!==null?t-hc:0;
+   D[G]=hc;D[G+1]=gx/TX;D[G+2]=gy/TX;D[G+3]=d.s&255}
+  if((di&63)===0&&performance.now()-last>30){bar.style.width=(10+30*di/all.length)+'%';await tick();last=performance.now()}
+ }
+ // iz haritası: taze akıntıların temizlediği yerler
+ const mw=512,mh=Math.round(512*GH/GW),mk=new Float32Array(mw*mh);
+ for(const p of paths){const f=Math.max(0,(p.t-.55)/.45);for(const q of p.p){const x=(q[0]-GX)/GW*mw,y=(q[1]-GY)/GH*mh,rr=q[2]*.95/GW*mw;for(let j=Math.max(0,Math.floor(y-rr));j<=Math.min(mh-1,y+rr);j++)for(let i=Math.max(0,Math.floor(x-rr));i<=Math.min(mw-1,x+rr);i++)if((i-x)**2+(j-y)**2<rr*rr)mk[j*mw+i]=Math.max(mk[j*mw+i],f)}}
+ // sis damlacıkları
+ const NM=+(Q.get('nm')||95000);
+ for(let n=0;n<NM;n++){const x=GX+r()*GW,y=GY+r()*GH;const mi=Math.min(mh-1,Math.floor((y-GY)/GH*mh))*mw+Math.min(mw-1,Math.floor((x-GX)/GW*mw));const cl=vn(x*.09,y*.09)*.5+vn(x*.35+9,y*.35)*.3;if(r()<mk[mi]*.96||r()<.45-cl)continue;
+  const rad=Math.min(.16,.034*Math.pow(1-r()*.99,-1/3.0));const ci=(x-GX)/TX,cj=(y-GY)/TX,rp=rad/TX;const i0=Math.floor(ci-rp-2),i1=Math.ceil(ci+rp+2),j0=Math.floor(cj-rp-2),j1=Math.ceil(cj+rp+2);if(i0<1||j0<1||i1>TW-2||j1>TH-2)continue;
+  let free=true;for(let j=j0;j<=j1&&free;j++)for(let i=i0;i<=i1;i++)if(D[(j*TW+i)*4]>-1){free=false;break}if(!free)continue;
+  const th=(38+gauss()*6)*Math.PI/180,Rs=rad/Math.sin(th),c=Rs*Math.cos(th),ex=1+gauss()*.10,ey=1+gauss()*.10;
+  for(let j=j0;j<=j1;j++)for(let i=i0;i<=i1;i++){const dx=(i+.5-ci)*TX*ex,dy=(j+.5-cj)*TX*ey,q=Math.hypot(dx,dy);if(q>rad+2.2*TX)continue;const G=(j*TW+i)*4;
+   if(q<rad){const z=Math.sqrt(Rs*Rs-q*q);D[G]=z-c;D[G+1]=-dx/z;D[G+2]=-dy/z}else{const s=Math.tan(th);D[G]=-(q-rad)*s;D[G+1]=-dx/q*s;D[G+2]=-dy/q*s}D[G+3]=n&255}
+  if((n&4095)===0){await tick()}
+ }
+ return D;
+}
+
+/* ---------- 3. mercek + kırılma ---------- */
+const YAW=24*Math.PI/180;
+const MAIN_FS=`
+uniform sampler2D uPrev,uEnv,uDrop;uniform int uN,uK;uniform vec2 uRes;uniform vec4 uG;out vec4 o;
+const float YAW=${YAW.toFixed(6)},FOC=225.;
+uint hs(uint x){x^=x>>16;x*=0x7feb352du;x^=x>>15;x*=0x846ca68bu;x^=x>>16;return x;}
+vec3 env(vec3 d,float lod){if(d.z<.0){return vec3(.018,.015,.013);}vec2 p=d.xy*sqrt(2./(1.+d.z));return textureLod(uEnv,p/3.+.5,lod).rgb*smoothstep(0.,.12,d.z)+vec3(.012)*(1.-smoothstep(0.,.12,d.z));}
+vec2 guv(vec2 p){return vec2((p.x-uG.x)/uG.z,(p.y-uG.y)/uG.w);}
+vec4 D(vec2 p){return textureLod(uDrop,guv(p),0.);}
+float fres(float ci,float ct,float n1,float n2){float a=(n1*ci-n2*ct)/(n1*ci+n2*ct),b=(n1*ct-n2*ci)/(n1*ct+n2*ci);return .5*(a*a+b*b);}
+const vec3 ROOM=vec3(.020,.0165,.013);
+vec3 glass(vec2 p,vec3 d,float ior){
+ vec4 s=D(p);
+ if(s.x<=0.)return env(d,.5)*.93+ROOM*.07;
+ vec3 w=refract(d,vec3(0,0,-1),1./ior);vec2 k=w.xy/w.z,q=p;
+ for(int i=0;i<4;i++){q=p+k*max(D(q).x,0.);}
+ s=D(q);vec3 N=normalize(vec3(-s.yz,1.));
+ float ci=dot(w,N);if(ci<=.02)return ROOM;
+ float s2=ior*ior*(1.-ci*ci);
+ vec3 L=vec3(0);float F=1.;
+ if(s2<1.){float ct=sqrt(1.-s2);F=fres(ci,ct,ior,1.);vec3 t=refract(w,-N,ior);L=env(t,.3)*(1.-F);}
+ if(F>.03){ // iç yansıma
+  vec3 r=reflect(w,N),P=vec3(q,max(s.x,0.));vec3 c=ROOM;float st=max(s.x,.05)*.22;P+=r*st*.6;bool done=false;
+  for(int i=0;i<18;i++){P+=r*st;if(P.z<0.){c=ROOM*1.5;done=true;break;}vec4 e=D(P.xy);if(e.x<P.z){vec3 M=normalize(vec3(-e.yz,1.));float cm=dot(r,M);if(cm>0.){vec3 t=refract(r,-M,ior);if(dot(t,t)>.5)c=env(t,.8);}done=true;break;}}
+  L+=c*F;}
+ return L*.97+ROOM*.03;}
+float blades(float a){const float n=7.;float s=6.2831853/n;return mix(1.,cos(s*.5)/cos(mod(a+.35,s)-s*.5),.55);}
+void main(){
+ ivec2 ip=ivec2(gl_FragCoord.xy);vec4 pv=texelFetch(uPrev,ip,0);
+ uint h=hs(uint(ip.x)+uint(ip.y)*8192u);uvec4 sh=uvec4(h,hs(h+1u),hs(h+2u),hs(h+3u));
+ float tx=tan(14.*.01745329),ty=tx*uRes.y/uRes.x;
+ vec3 f=vec3(sin(YAW),0.,cos(YAW)),r=vec3(cos(YAW),0.,-sin(YAW)),u=vec3(0,1,0);
+ float pit=.004;f=normalize(f+u*pit);u=normalize(u-f*dot(u,f));float rol=.012;vec3 r2=r*cos(rol)+u*sin(rol);u=u*cos(rol)-r*sin(rol);r=r2;
+ vec3 C=-f*FOC;vec3 acc=vec3(0);
+ for(int k=0;k<uK;k++){
+  uint i=uint(uN+k);
+  vec4 x=vec4(i*uvec4(3679390609u,3152041523u,2700274806u,2313257605u)+sh)*2.3283064e-10;
+  vec2 j=vec2(x.x+x.y-1.,x.z*0.+fract(x.x*1.+x.y*7.31+float(h&255u)/255.)-.5);
+  // piksel filtresi: çadır
+  vec2 a=vec2(x.x,x.y);a=vec2(a.x<.5?sqrt(2.*a.x)-1.:1.-sqrt(2.-2.*a.x),a.y<.5?sqrt(2.*a.y)-1.:1.-sqrt(2.-2.*a.y))*.85;
+  vec2 sc=((vec2(ip)+.5+a)/uRes*2.-1.);
+  float lr=sqrt(x.z),la=6.2831853*x.w;float bl=blades(la);vec2 ln=lr*bl*vec2(cos(la),sin(la));
+  float wt=.86+.30*pow(lr,5.)+.035*sin(lr*46.);
+  // kedi gözü
+  vec2 ce=ln+sc*vec2(.50,.34);wt*=smoothstep(1.13,1.07,length(ce));
+  vec3 col=vec3(0);
+  for(int c=0;c<3;c++){float cf=float(c)-1.;
+   float ca=1.+cf*.00045*dot(sc,sc);float Fd=FOC*.977*(1.+.0011*cf);
+   vec3 dirc=normalize(f+r*(sc.x*tx*ca)+u*(sc.y*ty*ca));
+   vec3 Pf=C+dirc*(Fd/dot(dirc,f));vec3 Lp=C+(r*ln.x+u*ln.y)*3.5;vec3 d=normalize(Pf-Lp);
+   float t=-Lp.z/d.z;vec3 g=glass((Lp+d*t).xy,d,1.3335+cf*.0032);col[c]=g[c];}
+  acc+=min(col,vec3(90.))*wt;}
+ o=pv+vec4(acc,float(uK));
+}`;
+
+/* ---------- 4. duyarga ---------- */
+const RES_FS=`uniform sampler2D uPrev;out vec4 o;void main(){vec4 a=texelFetch(uPrev,ivec2(gl_FragCoord.xy),0);o=vec4(a.rgb/max(a.a,1.),1.);}`;
+const POST_FS=`
+uniform sampler2D uImg;uniform vec2 uRes;uniform float uExp;out vec4 o;
+uint hs(uint x){x^=x>>16;x*=0x7feb352du;x^=x>>15;x*=0x846ca68bu;x^=x>>16;return x;}
+float rn(ivec2 p,uint s){return float(hs(uint(p.x)+uint(p.y)*16384u+s*268435459u))*2.3283064e-10;}
+float ga(ivec2 p,uint s){return (rn(p,s)+rn(p,s+1u)+rn(p,s+2u)+rn(p,s+3u)-2.)*1.73;}
+float gs(ivec2 p,uint s){return ga(p,s)*.62+(ga(p+ivec2(1,0),s)+ga(p+ivec2(-1,0),s)+ga(p+ivec2(0,1),s)+ga(p+ivec2(0,-1),s))*.26;}
+float gc(ivec2 p,uint s){float a=0.;for(int j=-2;j<=2;j++)for(int i=-2;i<=2;i++)a+=ga((p+ivec2(i,j)*1),s);return a/5.;}
+vec3 tap(vec2 uv,float l){vec2 e=exp2(l)/uRes;vec3 c=vec3(0);for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){float w=(i==0?2.:1.)*(j==0?2.:1.);c+=w*textureLod(uImg,uv+vec2(i,j)*e,l).rgb;}return c/16.;}
+float cur(float x){ // gölge + omuz
+ x=max(x,0.);float a=.55;float y=x<a?x:a+(1.-a)*(1.-exp(-(x-a)/(1.-a)*.95));return y;}
+void main(){
+ ivec2 ip=ivec2(gl_FragCoord.xy);vec2 uv=gl_FragCoord.xy/uRes;
+ vec3 c=texelFetch(uImg,ip,0).rgb;
+ vec3 nb=texelFetch(uImg,ip+ivec2(1,0),0).rgb+texelFetch(uImg,ip-ivec2(1,0),0).rgb+texelFetch(uImg,ip+ivec2(0,1),0).rgb+texelFetch(uImg,ip-ivec2(0,1),0).rgb;
+ vec3 sh=c*4.-nb;c+=clamp(sh*.10,-.25*c,.25*c);
+ vec3 bl=tap(uv,4.)*.30+tap(uv,5.5)*.28+tap(uv,7.)*.24+tap(uv,8.5)*.18;
+ c=mix(c,bl,.040);
+ vec2 q=uv-.5;c*=1.-.32*dot(q,q);
+ c*=uExp;
+ // gürültü: foton + okuma
+ float l=dot(c,vec3(.3,.6,.1));
+ vec3 sg=sqrt(max(c,0.)*.00115+.0000135);
+ c+=gs(ip,11u)*sg*.95+vec3(gc(ip,31u),gc(ip,41u)*.5,gc(ip,51u))*sg*.55;
+ c=max(c,0.);
+ // renk: hafif sinyal karışımı, ışıkta doygunluk kaybı
+ c=mat3(1.10,-.03,-.01,-.08,1.07,-.09,-.02,-.04,1.10)*c;c=max(c,0.);
+ c=vec3(cur(c.r),cur(c.g),cur(c.b));
+ c=mix(12.92*c,1.055*pow(max(c,1e-5),vec3(1./2.4))-.055,step(.0031308,c));
+ c=mix(c,c*c*(3.-2.*c),.50);c=max(vec3(0),(c-.012)*1.012);
+ c+= (vec3(rn(ip,91u),rn(ip,92u),rn(ip,93u))-.5)/255.;
+ o=vec4(c,1.);
+}`;
+
+/* ---------- yürüt ---------- */
+async function run(){
+ gl.disable(gl.BLEND);gl.disable(gl.DEPTH_TEST);
+ const t0=performance.now();
+ // ışık haritası
+ const pe=prog(ENV_FS);let ta=tex(ENV_N,ENV_N,gl.RGBA32F,gl.RGBA,gl.FLOAT),tb=tex(ENV_N,ENV_N,gl.RGBA32F,gl.RGBA,gl.FLOAT);let fa=fbo(ta),fb=fbo(tb);
+ gl.useProgram(pe.p);gl.viewport(0,0,ENV_N,ENV_N);gl.uniform4i(pe.u.uCnt,B.length,S.length,T.length,L.length);gl.uniform1f(pe.u.uYaw,27*Math.PI/180);
+ bind(pe.u.uBox,tBox,1);bind(pe.u.uSph,tSph,2);bind(pe.u.uTre,tTre,3);bind(pe.u.uLmp,tLmp,4);
+ gl.enable(gl.SCISSOR_TEST);let strips=16;
+ for(let n=0;n<ENV_SPP;n++){bind(pe.u.uPrev,ta,0);gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.uniform1i(pe.u.uN,n);const t=performance.now();let s=0;
+  for(;s<strips;s++){const y0=Math.floor(ENV_N*s/strips),y1=Math.floor(ENV_N*(s+1)/strips);gl.scissor(0,y0,ENV_N,y1-y0);gl.drawArrays(gl.TRIANGLES,0,3);if(strips>1){sync();if((s&1)===1)await tick()}}
+  sync();const dt=performance.now()-t;if(dt/strips>120)strips=Math.min(256,strips*2);else if(dt/strips<30&&strips>1)strips=Math.max(1,strips>>1);
+  [ta,tb]=[tb,ta];[fa,fb]=[fb,fa];if(n>=31&&performance.now()-t0>45e3)n=ENV_SPP;bar.style.width=Math.min(10,10*(n+1)/ENV_SPP)+'%';await tick()}
+ gl.disable(gl.SCISSOR_TEST);
+ const pr=prog(RES_FS);const tEnv=tex(ENV_N,ENV_N,gl.RGBA16F,gl.RGBA,gl.HALF_FLOAT,null,gl.LINEAR,true),fEnv=fbo(tEnv);
+ gl.useProgram(pr.p);bind(pr.u.uPrev,ta,0);gl.bindFramebuffer(gl.FRAMEBUFFER,fEnv);gl.drawArrays(gl.TRIANGLES,0,3);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tEnv);gl.generateMipmap(gl.TEXTURE_2D);
+ gl.deleteTexture(ta);gl.deleteTexture(tb);
+ console.log('env',((performance.now()-t0)/1e3).toFixed(1),'kutu',B.length,'lamba',L.length);
+ const pp=prog(POST_FS);
+ const show=(t,w,h,exp)=>{gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,IMG_W,IMG_H);gl.useProgram(pp.p);bind(pp.u.uImg,t,0);gl.uniform2f(pp.u.uRes,IMG_W,IMG_H);gl.uniform1f(pp.u.uExp,exp);gl.drawArrays(gl.TRIANGLES,0,3)};
+ const EXP=+(Q.get('exp')||1.35);
+ // damlalar
+ const t1=performance.now();const sim=makeDrops();console.log('sim',sim.all.length,((performance.now()-t1)/1e3).toFixed(1));await tick();
+ const D=await rasterDrops(sim);console.log('raster',((performance.now()-t1)/1e3).toFixed(1));
+ const tDrop=tex(TW,TH,gl.RGBA16F,gl.RGBA,gl.FLOAT,D,gl.LINEAR);
+ // ana kare
+ const pm=prog(MAIN_FS);let ma=tex(IMG_W,IMG_H,gl.RGBA32F,gl.RGBA,gl.FLOAT),mb=tex(IMG_W,IMG_H,gl.RGBA32F,gl.RGBA,gl.FLOAT);let ga=fbo(ma),gb=fbo(mb);
+ gl.useProgram(pm.p);gl.viewport(0,0,IMG_W,IMG_H);bind(pm.u.uEnv,tEnv,1);bind(pm.u.uDrop,tDrop,2);gl.uniform2f(pm.u.uRes,IMG_W,IMG_H);gl.uniform4f(pm.u.uG,GX,GY,GW,GH);
+ gl.enable(gl.SCISSOR_TEST);let K=2,ms=8,done=0;const t2=performance.now();
+ while(done<SPP&&(done<320||performance.now()-t2<9e4)){const k=Math.min(K,SPP-done);gl.useProgram(pm.p);gl.viewport(0,0,IMG_W,IMG_H);bind(pm.u.uPrev,ma,0);bind(pm.u.uEnv,tEnv,1);bind(pm.u.uDrop,tDrop,2);gl.bindFramebuffer(gl.FRAMEBUFFER,gb);gl.uniform1i(pm.u.uN,done);gl.uniform1i(pm.u.uK,k);
+  const t=performance.now();for(let s=0;s<ms;s++){const y0=Math.floor(IMG_H*s/ms),y1=Math.floor(IMG_H*(s+1)/ms);gl.scissor(0,y0,IMG_W,y1-y0);gl.drawArrays(gl.TRIANGLES,0,3);sync();if(performance.now()-t>60)await tick()}
+  const dt=(performance.now()-t)/ms;if(dt>90){if(K>1)K=Math.max(1,K>>1);else ms=Math.min(128,ms*2)}else if(dt<28){if(ms>4)ms>>=1;else K=Math.min(16,K*2)}
+  [ma,mb]=[mb,ma];[ga,gb]=[gb,ga];done+=k;bar.style.width=(40+60*done/SPP)+'%';await tick()}
+ gl.disable(gl.SCISSOR_TEST);
+ const tImg=tex(IMG_W,IMG_H,gl.RGBA16F,gl.RGBA,gl.HALF_FLOAT,null,gl.LINEAR,true),fImg=fbo(tImg);
+ gl.useProgram(pr.p);gl.viewport(0,0,IMG_W,IMG_H);bind(pr.u.uPrev,ma,0);gl.drawArrays(gl.TRIANGLES,0,3);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tImg);gl.generateMipmap(gl.TEXTURE_2D);
+ show(tImg,IMG_W,IMG_H,EXP);
+ console.log('render',((performance.now()-t2)/1e3).toFixed(1),'toplam',((performance.now()-t0)/1e3).toFixed(1));
+ document.getElementById('b').style.opacity=0;cv.classList.add('ok');window.__done=true;
+}
+run().catch(e=>{console.error(e);if(!window.__err)say('Hata: '+e)});
+})();
+</script>
+</body>
+</html>

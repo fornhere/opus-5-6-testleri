@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Beyaz Gölge</title>
+<style>
+  :root{--zemin:#101413;--kagit:#e6dfcd;--soluk:#9aa39b;--mercan:#e8663a}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--zemin);color:var(--kagit);font:15px/1.5 "Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,serif}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100dvh;overflow-x:hidden}
+  main{width:min(100vw,calc((100dvh - 92px)*2))}
+  canvas{display:block;width:100%;height:auto;aspect-ratio:2/1;background:#1a201f;cursor:zoom-in}
+  canvas:fullscreen{width:100vw;height:100vh;object-fit:contain;background:#000;cursor:zoom-out}
+  .alt{display:flex;gap:28px;align-items:flex-start;justify-content:space-between;padding:14px 16px 12px;min-height:92px}
+  h1{font-size:15px;font-weight:600;margin:0;display:inline}
+  .alt p{margin:0;max-width:118ch;color:var(--soluk);text-wrap:pretty}
+  .alt p b{color:var(--kagit);font-weight:600}
+  nav{display:flex;gap:4px;flex:none}
+  nav button{font:inherit;color:var(--soluk);background:none;border:0;border-bottom:2px solid transparent;padding:2px 9px 4px;cursor:pointer;white-space:nowrap}
+  nav button:hover{color:var(--kagit)}
+  nav button[aria-pressed=true]{color:var(--kagit);border-color:var(--mercan)}
+  nav button:focus-visible,canvas:focus-visible{outline:2px solid var(--mercan);outline-offset:2px}
+  #msg{position:fixed;inset:auto 0 45% 0;margin:auto;max-width:40rem;padding:0 24px;text-align:center;color:var(--kagit);white-space:pre-wrap}
+  @media (max-width:820px){.alt{flex-direction:column-reverse;gap:10px}nav{flex-wrap:wrap;margin-left:-9px}main{width:100vw}}
+</style>
+</head>
+<body>
+<main>
+<canvas id="c" tabindex="0" role="img" aria-label="Güneşin kıpırdamadığı bir gezegende, kalıcı gölgelerin kırağıyla beyaza döndüğü bir ova; gölge sınırına dizilmiş kemer gövdeli canlılar ve gölgenin içinde donmuş dev buz yapılar."></canvas>
+<div class="alt"><p id="cap"></p><nav aria-label="Levhalar" id="nav"></nav></div>
+</main>
+<div id="msg">Resim hazırlanıyor…</div>
+
+<script id="common" type="x-glsl">#version 300 es
+precision highp float; precision highp int;
+#define PI 3.14159265
+float h11(float p){p=fract(p*.1031);p*=p+33.33;p*=p+p;return fract(p);}
+float h21(vec2 p){vec3 q=fract(vec3(p.xyx)*.1031);q+=dot(q,q.yzx+33.33);return fract((q.x+q.y)*q.z);}
+vec2 h22(vec2 p){vec3 q=fract(vec3(p.xyx)*vec3(.1031,.1030,.0973));q+=dot(q,q.yzx+33.33);return fract((q.xx+q.yz)*q.zy);}
+float h31(vec3 p){p=fract(p*.1031);p+=dot(p,p.zyx+31.32);return fract((p.x+p.y)*p.z);}
+float n2(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
+  return mix(mix(h21(i),h21(i+vec2(1,0)),f.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x),f.y);}
+float n3(vec3 p){vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
+  return mix(mix(mix(h31(i),h31(i+vec3(1,0,0)),f.x),mix(h31(i+vec3(0,1,0)),h31(i+vec3(1,1,0)),f.x),f.y),
+             mix(mix(h31(i+vec3(0,0,1)),h31(i+vec3(1,0,1)),f.x),mix(h31(i+vec3(0,1,1)),h31(i+vec3(1,1,1)),f.x),f.y),f.z);}
+float fbm(vec2 p){float a=.5,s=0.;for(int i=0;i<5;i++){s+=a*n2(p);p=mat2(1.6,1.2,-1.2,1.6)*p+3.1;a*=.5;}return s;}
+</script>
+
+<script id="vs" type="x-glsl">#version 300 es
+void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.-1.,0,1);}
+</script>
+
+<!-- ===================== DÜNYA ===================== -->
+<script id="world" type="x-glsl">
+layout(location=0) out vec4 o0; layout(location=1) out vec4 o1;
+uniform vec2 uRes; uniform int uFrame; uniform int uMaxStep;
+uniform vec3 uCam; uniform mat3 uBasis; uniform float uTan; uniform vec2 uLens; // lens: açıklık, odak
+uniform vec3 L,U,V;             // güneş yönü ve güneşe dik düzlem
+uniform vec2 Lg,Ug;             // L ve U'nun yerdeki izdüşümü (xz)
+#define NF 64
+#define NC 16
+#define NK 28
+uniform vec4 uF0[NF];           // yelpaze: u,v,açı,R
+uniform vec4 uF1[NF];           // yarım açı, s düzlemi, buz boyu, tohum
+uniform vec4 uC0[NC];           // gölgelik: sınır çemberi u,v,r ve s
+uniform vec4 uC1[NC];           // yelpaze başı, sonu, buz boyu, göz ölçeği
+uniform int uNC,uNK,uBF;
+uniform vec4 uK0[NK];           // canlı: u,a,ölçek,dönüş
+uniform vec4 uK1[NK];           // eğilme, tohum, yelpaze, -
+const float SR=.0046;           // güneşin açısal yarıçapı
+const vec3 SUN=vec3(1.,.73,.47)*21.;
+
+uint rs; float rnd(){rs=rs*747796405u+2891336453u;uint w=((rs>>((rs>>28u)+4u))^rs)*277803737u;w=(w>>22u)^w;return float(w)*2.3283064e-10;}
+
+// ---------- zemin ----------
+vec2 ua(vec2 xz){return vec2(dot(xz,Ug),dot(xz,Lg));}
+float terr(vec2 xz){
+  vec2 q=ua(xz);
+  float calm=smoothstep(4.,16.,abs(q.x+4.));
+  float h=(.5*(n2(q*vec2(.09,.045))-.5)+.13*(n2(q*vec2(.5,.2)+7.)-.5))*calm;
+  float m=smoothstep(70.,300.,abs(q.x-20.))*smoothstep(120.,620.,q.y);
+  if(m>0.){float y=n2(q*vec2(.0125,.0031)+3.7);y=1.-abs(2.*y-1.);y=y*y;
+    float y2=n2(q*vec2(.045,.009)+9.);
+    h+=m*(38.*y*y+9.*y2*y+2.*n2(q*vec2(.2,.03)))*(.35+.65*smoothstep(400.,1500.,q.y));}
+  float m3=smoothstep(170.,400.,q.y)*smoothstep(0.,60.,abs(q.x+14.)+smoothstep(500.,700.,q.y)*60.);
+  if(m3>0.){float d1=n2(q*vec2(.021,.011)+31.),d2=n2(q*vec2(.07,.03)+5.); h+=m3*(9.*d1*d1+2.6*d2-2.);}
+  return h;
+}
+
+// ---------- yelpaze (mimarinin birimi) ----------
+float bord(vec3 p);
+// x: dolu uzaklık, y: dış hat, z: göz uzaklığı (göz içinde <0), w: halka oranı
+vec4 fan(int i,vec2 uv){
+  vec4 A=uF0[i],B=uF1[i]; vec2 q=uv-A.xy; float c=cos(A.z),s=sin(A.z); q=vec2(c*q.x-s*q.y,s*q.x+c*q.y);
+  float R=A.w,al=B.x,sd=B.w; vec2 qo=q; if(i!=uBF)q+=R*.030*vec2(sin(q.y/R*8.+sd*5.),sin(q.x/R*9.+sd*3.)); float r=length(q)+1e-4,th=atan(q.x,q.y);
+  float n=2.+floor(3.*h11(sd+1.));
+  float sc=abs(sin(th/al*PI*.5*n+sd*6.));
+  float bf=i==uBF?0.:1.,tn=min(abs(th)/al,1.3);
+  float Re=R*(1.-.14*bf*(1.-sqrt(sc)))*(1.-.30*tn*tn)*(1.-.05*bf*sin(th*2.3+sd*9.));
+  float cl=th-al*(h11(sd+2.)-.5)*.9; Re*=1.-.36*bf*exp(-cl*cl*(1400./(1.+R*.05)));
+  float dO=r-Re;
+  float dA=r*sin(clamp(abs(th)-al,-1.57,1.57));
+  float kk=R*.10,hd=clamp(.5+.5*(dO-dA)/kk,0.,1.); float d=mix(dA,dO,hd)+kk*hd*(1.-hd);
+  float sm=step(R,16.); float Nr=5.+floor(3.*h11(sd+3.))-2.*sm;
+  float rho=Nr*pow(r/R,.72),k=floor(rho),f=fract(rho)-.5;
+  float dh=1e3;
+  if(d<R*.12 && k>=1. && rho<Nr*1.02){
+    float rk=R*pow((k+.5)/Nr,1./.72);
+    float wr=R*(pow((k+1.)/Nr,1./.72)-pow(k/Nr,1./.72));
+    float nk=max(2.,floor(2.*al*rk/(R*(.060+.035*h11(sd*3.+k*1.7)))));
+    float a=(th+al)/(2.*al)*nk+.35*sin(th*3.+k*2.1+sd); float j=floor(a),g=fract(a)-.5;
+    float wa=2.*al*r/nk; vec2 hh=h22(vec2(j+k*17.,sd*13.+k));
+    if(hh.x>mix(.13,.34,sm) && j>=0. && j<nk){
+      float f2=f,hr=wr; float sp=step(.72,hh.y); if(sp>.5){ f2=fract((f+.5)*2.)-.5; hr=wr*.5; } // bazı gözler bölünmüş
+      vec2 b=vec2(wa*(.17+.17*hh.y)*(1.+.7*f),hr*(.24+.20*hh.x*(1.-sp)+.10*sp));
+      vec2 e=abs(vec2(g*wa+(hh.x-.5)*.22*wa+.10*wa*sin(f2*3.+hh.y*6.),f2*hr+(hh.y-.5)*.12*wr*(1.-sp)))-b; float rr=min(b.x,b.y)*.97;
+      dh=length(max(e+rr,0.))+min(max(e.x+rr,e.y+rr),0.)-rr;
+      dh=max(dh,max(dO+R*.022,dA+R*.026));
+    }
+  }
+  return vec4(max(d,-dh),d,dh,clamp(k/Nr,0.,1.));
+}
+float bord(vec3 p){return -fan(uBF,vec2(dot(p,U),dot(p,V))).y;} // + gölge, - ışık
+float sunArch(vec3 p){
+  vec3 q=vec3(dot(p,U),dot(p,V),dot(p,L)); float vis=1.;
+  for(int c=0;c<uNC;c++){
+    vec4 C=uC0[c]; float ds=C.w-q.z; if(ds<0.)continue;
+    float w=ds*SR+.04; if(length(q.xy-C.xy)-C.z>w)continue;
+    vec4 D=uC1[c];
+    for(int i=int(D.x);i<int(D.y);i++){
+      vec4 f=fan(i,q.xy);
+      float hs=max(D.w,.05);
+      float vO=smoothstep(-w,w,f.y),vH=smoothstep(-w,w,-f.z);
+      vH=mix(min(vH*1.35,1.),.14,clamp(w/hs*.55-.35,0.,1.)*step(f.y,0.));
+      vis=min(vis,max(vO,vH));
+    }
+    if(vis<.004)return 0.;
+  }
+  return vis;
+}
+
+// ---------- küçük nesneler ----------
+float mapSmall(vec3 p,out float mat){
+  float d=1e3; mat=3.;
+  vec2 q=ua(p.xz); float h=p.y-terr(p.xz);
+  if(h>1.6||q.y>240.)return max(h-1.2,.4);
+  { // kaya
+    float cs=2.6; vec2 id=floor(q/cs); vec2 r=h22(id+5.); float k=h21(id+91.);
+    float lit=step(id.x*cs,-8.); if(k<mix(.16*smoothstep(.55,.72,n2(id*.11+2.)),.34,lit) && abs(id.x*cs+cs*.5+6.5)>2.2){
+      float R=.07+.40*pow(h21(id+33.),4.); vec2 c=(id+.5+(r-.5)*.5)*cs; vec3 w=vec3(q.x-c.x,h-R*.25,q.y-c.y);
+      float an=r.x*6.28;w.xz=mat2(cos(an),-sin(an),sin(an),cos(an))*w.xz;
+      w/=vec3(1.,.7,1.5); w+=(n3(w*3./R+id.xyx)-.5)*.45*R; d=min(d,(length(w)-R)*.62);
+    }
+  }
+  return d;
+}
+// sınır bitkisi: ışığı alan para gibi diskler
+float mapFlora(vec3 p,out float mat){
+  mat=20.; vec2 q=ua(p.xz); float h=p.y-terr(p.xz);
+  if(h>1.1||q.y>70.||abs(q.x+4.)>9.)return max(h-.8,max(abs(q.x+4.)-9.,.35));
+  float d=1e3; 
+  for(int l=0;l<2;l++){
+    float cs=l==0?.62:.38; vec2 q2=q+float(l)*vec2(.31,.17); vec2 id=floor(q2/cs); vec2 r=h22(id+float(l)*50.);
+    vec2 c=(id+.5+(r-.5)*.5)*cs; vec2 cw=Ug*c.x+Lg*c.y; float bx=bord(vec3(cw.x,0.,cw.y));
+    float dens=exp(-bx*bx/(l==0?.7:1.1))*.85+.003; dens*=smoothstep(.30,.62,n2(c*.42+4.));
+    if(h21(id+float(l)*9.+2.)>dens)continue;
+    vec3 w=vec3(q2.x-c.x,h,q2.y-c.y); float H=(l==0?.16:.08)+.42*r.x*r.x*(l==0?1.:.5); float side=bx<0.?1.:-1.;
+    for(int k=0;k<5;k++){ float fk=float(k)-2.; float hk=H*(1.-.16*abs(fk)); vec3 tip=vec3(fk*.34*hk+.06*sin(r.y*6.+fk*2.),hk,-.10*hk+.12*hk*sin(fk*3.+r.y*9.)); vec3 bs=vec3(fk*.018,0.,0.);
+      vec3 pa=w-bs,ba=tip-bs; float u=clamp(dot(pa,ba)/dot(ba,ba),0.,1.); vec3 ax=pa-ba*u; ax.x-=fk*.10*hk*u*(1.-u)*2.; float wr=(.010+.052*hk)*sqrt(u+.04)*(1.12-u)*1.5; float dd=length(ax*vec3(1.,1.,1.5))-wr*(1.+.12*hk); if(dd<d){d=dd;mat=bx<.12?20.:20.5;} }
+    float nd=length(w-vec3(0,.015,0))-.035; if(nd<d){d=nd;mat=21.;}
+  }
+  return d*.7;
+}
+
+// ---------- canlı ----------
+float ell(vec2 p,vec2 ab){vec2 q=p/ab;float k0=length(q),k1=length(q/ab);return k0*(k0-1.)/max(k1,1e-4);}
+float ell3(vec3 p,vec3 r){float k0=length(p/r),k1=length(p/(r*r));return k0*(k0-1.)/max(k1,1e-4);}
+float cap(vec3 p,vec3 a,vec3 b,float r){vec3 pa=p-a,ba=b-a;float h=clamp(dot(pa,ba)/dot(ba,ba),0.,1.);return length(pa-ba*h)-r;}
+vec2 mn(vec2 a,vec2 b){return a.x<b.x?a:b;}
+vec2 creature(vec3 p,vec4 K1){
+  float sd=K1.y; { float a=K1.z,px=a>0.?1.31:-1.33; float c=cos(a),s=sin(a); p.x-=px; p.xy=mat2(c,s,-s,c)*p.xy; p.x+=px; } p.x-=K1.x*p.y*p.y*.12; p.z-=.08*sin(sd*7.)*p.y*p.y*.3;
+  vec2 R=vec2(1e3,10.);
+  vec3 o=p-vec3(0,.22,0); vec2 AB=vec2(1.32,1.92); o.x-=.16*o.y*smoothstep(0.,1.6,o.y)*.5;
+  float ang=atan(o.y/AB.y,o.x/AB.x);
+  if(o.y>-.12){
+    float e=ell(o.xy,AB); float tp=.6+.4*abs(cos(ang));
+    float bump=.5+.5*cos(ang*34.); 
+    float d=length(vec2(e,o.z*.62))-(.060+.085*smoothstep(.2,2.9,ang)+.050*smoothstep(.75,0.,ang)+.020*bump*bump);
+    d=max(d,-o.y-.1); R=mn(R,vec2(d*.75,10.));
+    vec2 ab2=vec2(1.02,1.42); vec3 o2=o-vec3(.03,-.02,0);
+    float e2=ell(o2.xy,ab2);
+    d=length(vec2(e2,o.z))-.036; d=max(d,-o.y); R=mn(R,vec2(d,10.2));
+    float rb=.5+.5*cos(ang*21.+sd);
+    float zz=o.z+.055*sin(ang*21.+sd)*smoothstep(0.,.25,-e);
+    d=max(abs(zz)-(.010+.03*pow(rb,10.)),max(e,-e2)); d=max(d,-o.y+.05); R=mn(R,vec2(d*.7,11.));
+  }
+  // sıcak uç: güneşe dik siyah pedler, kemere doğru küçülür
+  for(int i=0;i<7;i++){ float f=float(i); float t=f/6.; vec2 b=vec2(-1.36+.30*t*t,.16+1.05*t); vec3 w=p-vec3(b,-.26+.085*f);
+    float a=1.12-.98*t+.10*sin(sd+f*2.); float c=cos(a),s=sin(a); w.xy=vec2(c*w.x+s*w.y,-s*w.x+c*w.y);
+    float H=(1.28-.72*t)*(.92+.16*sin(f*1.7+sd*3.)); float y=w.y/H; w.z+=.26*w.x*w.x+.22*H*y*y;
+    float ww=H*(.27+.06*sin(f*3.))*sqrt(max(y,0.))*sqrt(max(1.06-y,0.))*1.9; float e=max(abs(w.x)-ww,abs(y-.5)*H-.52*H);
+    float d=max(e*.75,abs(w.z)-.016-.012*smoothstep(.06,.0,abs(w.x)))-.010; d+=.004*cos(w.x*90./H); R=mn(R,vec2(d*.72,12.)); }
+  R=mn(R,vec2(ell3(p-vec3(-1.33,.15,-.02),vec3(.36,.24,.5)),14.));
+  R=mn(R,vec2(ell3(p-vec3(1.31,.11,0.),vec3(.17,.17,.72)),15.)); R=mn(R,vec2(ell3(p-vec3(1.29,.27,-.02),vec3(.13,.17,.2)),15.));
+  // soğuk uç: katlı yelpaze (geceye bakar)
+  { vec3 w=p-vec3(1.28,.22,-.16); float r=length(w.xy),a=atan(w.y,w.x); float RR=(1.38+.16*fract(sd*5.3))*(1.+.035*cos(a*36.)+.05*sin(a*4.+sd));
+    float tri=abs(fract(a*36./6.2832)-.5)*4.-1.; float z0=(.055+.10*r)*tri*.55-.16*r*r;
+    float an=max(a-1.95,-.30-a)*r; float d=max((abs(w.z-z0)-.010)*.52,max(r-RR,an)); d=max(d,.16-r);
+    R=mn(R,vec2(d*.8,13.)); }
+  // sarkaç: duyu ve el
+  for(int i=0;i<9;i++){ float f=float(i),a=f*2.4+sd; vec3 b=vec3(.05+.13*sin(a)*(.4+.07*f),.50+.085*f,.13*cos(a)*(.4+.07*f)); vec3 t=vec3(.03+.03*sin(a),1.72,.03*cos(a));
+    vec3 m=mix(t,b,.5)+vec3(.05*sin(a*1.3),0,.05*cos(a)); float d=min(cap(p,t,m,.013),cap(p,m,b,.010)); R=mn(R,vec2(d,16.));
+    R=mn(R,vec2(length((p-b)*vec3(1.,.6,1.))-.036,17.)); }
+  R=mn(R,vec2(ell3(p-vec3(.03,1.80,0),vec3(.14,.2,.14)),16.));
+  return R;
+}
+vec3 toK(vec3 p,int i,out float k){ vec4 K=uK0[i]; k=K.z; vec2 c=Ug*K.x+Lg*K.y; vec3 w=p-vec3(c.x,uK1[i].w!=0.?uK1[i].w:terr(c)-.03,c.y);
+  w=vec3(dot(w.xz,Ug),w.y,dot(w.xz,Lg)); float cs=cos(K.w),sn=sin(K.w); w.xz=mat2(cs,-sn,sn,cs)*w.xz; return w/k; }
+vec2 mapK(vec3 p){
+  vec2 R=vec2(1e3,10.);
+  for(int i=0;i<uNK;i++){ vec4 K=uK0[i]; vec2 c=Ug*K.x+Lg*K.y; float b=length(p-vec3(c.x,uK1[i].w+K.z,c.y))-2.75*K.z;
+    if(b>.4){R.x=min(R.x,b);continue;}
+    float k;vec3 w=toK(p,i,k); vec2 r=creature(w,uK1[i]); r.x*=k*.9; R=mn(R,r); }
+  return R;
+}
+
+// dönenler: sınır yüzeyindeki sıcak-soğuk akımda döne döne asılı kalan burgu şeritler (bir yüzü siyah, bir yüzü ak)
+uniform vec4 uS[24]; uniform int uNS;
+vec2 mapS(vec3 p){ vec2 R=vec2(1e3,30.); for(int i=0;i<uNS;i++){ vec4 S=uS[i]; vec3 w=p-S.xyz; float b=length(w)-S.w*1.15; if(b>S.w*.5+.2){R.x=min(R.x,b);continue;}
+  float y=w.y/S.w; w.x-=.22*S.w*sin(y*2.2+float(i)); float a=y*5.2+float(i)*1.9; float c=cos(a),s=sin(a); w.xz=mat2(c,-s,s,c)*w.xz; float ww=S.w*.15*sqrt(max(1.-y*y,0.))+.01; w.z-=.35*w.x*w.x/S.w;
+  float d=max(max(abs(w.x)-ww,abs(w.z)-.012*S.w),abs(y)*S.w-S.w); R=mn(R,vec2(d*.6,w.z<0.?30.:31.)); } return R; }
+
+// ---------- mimari ----------
+vec2 mapC(vec3 p){
+  vec3 q=vec3(dot(p,U),dot(p,V),dot(p,L)); vec2 R=vec2(1e4,2.);
+  for(int c=0;c<uNC;c++){
+    vec4 C=uC0[c],D=uC1[c]; float bd=max(length(q.xy-C.xy)-C.z,0.),sdv=max(max(q.z-C.w-8.,C.w-D.z-q.z),0.);
+    float b=length(vec2(bd,sdv)); float lim=1.5+D.w*.4; if(b>lim){R.x=min(R.x,b-lim*.5);continue;}
+    for(int i=int(D.x);i<int(D.y);i++){
+      vec4 A=uF0[i],B=uF1[i]; float bb=length(q.xy-A.xy)-A.w*1.05; float s0=B.y;
+      float sb=max(max(q.z-s0-3.,s0-B.z-q.z),0.); float b2=length(vec2(max(bb,0.),sb)); if(b2>lim){R.x=min(R.x,b2-lim*.5);continue;}
+      vec4 f=fan(i,q.xy); float th=.25+A.w*.006;
+      // kalkan
+      float ds=max(f.x-A.w*.004,abs(q.z-s0)-th);
+      // buz: gölgenin katılaşmış hâli; içteki halkalar daha eski, daha uzun
+      float len=B.z*(1.-.80*f.w); len*=.80+.40*h11(f.w*37.+B.w*5.);
+      float di=max(f.x+A.w*.008,max(s0-len-q.z,q.z-s0));
+      R=mn(R,vec2(di*.62,2.)); R=mn(R,vec2(ds*.7,1.));
+    }
+  }
+  return R;
+}
+vec2 map(vec3 p){
+  vec2 R=vec2((p.y-terr(p.xz))*.85,0.);
+  float m,d; 
+  if(p.y<4.){ d=mapSmall(p,m); R=mn(R,vec2(d,m)); d=mapFlora(p,m); R=mn(R,vec2(d,m)); }
+  R=mn(R,mapK(p)); R=mn(R,mapS(p)); R=mn(R,mapC(p)); return R;
+}
+vec3 nrm(vec3 p,float e){vec2 k=vec2(1,-1);return normalize(k.xyy*map(p+k.xyy*e).x+k.yyx*map(p+k.yyx*e).x+k.yxy*map(p+k.yxy*e).x+k.xxx*map(p+k.xxx*e).x);}
+
+// ---------- gökyüzü ----------
+vec3 skyBase(vec3 rd){
+  float mu=max(dot(rd,L),0.),e=max(rd.y,0.); float az=dot(normalize(rd.xz+1e-5),Lg)*.5+.5;
+  vec3 hor=vec3(.60,.52,.40),mid=vec3(.165,.262,.268),zen=vec3(.016,.045,.062);
+  vec3 c=mix(hor,mid,1.-exp(-e*8.5)); c=mix(c,zen,1.-exp(-max(e-.03,0.)*3.1));
+  c=mix(c*vec3(.58,.74,.86),c,pow(az,1.35));
+  c+=vec3(1.,.70,.42)*(.10*pow(mu,9.)+.40*pow(mu,44.)+.95*pow(mu,380.));
+  return c;
+}
+vec3 sky(vec3 rd){
+  vec3 c=skyBase(rd);
+  if(rd.y>.004){ vec2 P=ua(rd.xz/rd.y); float mu=max(dot(rd,L),0.);
+    vec2 w=vec2(n2(P*vec2(.55,.16)),n2(P*vec2(.4,.2)+9.))-.5;
+    float f=fbm(P*vec2(1.15,.10)+w*.8+2.3),f2=fbm(P*vec2(5.,.34)+w*1.4+11.),f3=fbm(P*vec2(16.,1.1)+w*2.+5.);
+    float D=smoothstep(.44,.66,f+.24*(f2-.5)+.12*(f3-.5)); float th=smoothstep(.50,.80,f+.2*(f2-.5));
+    D*=smoothstep(.006,.09,rd.y);
+    float lit=.05+.95*pow(mu,13.); vec3 edge=mix(vec3(.27,.36,.36),vec3(1.5,1.12,.72),lit),core=mix(vec3(.070,.115,.130),vec3(.72,.52,.36),lit);
+    c=mix(c,mix(edge,core,th)*(.8+.4*f2),D*.74);
+  }
+  return c;
+}
+float hg(float mu,float g){float g2=g*g;return (1.-g2)/(4.*PI*pow(1.+g2-2.*g*mu,1.5));}
+float sigma(vec3 p){return .00034*exp(-max(p.y,0.)/120.);}
+
+float march(vec3 ro,vec3 rd,float tmx,out float mat,int N){
+  float t=.02; mat=-1.;
+  for(int i=0;i<N;i++){ vec3 p=ro+rd*t; if(p.y>330.&&rd.y>0.)break; vec2 r=map(p); if(r.x<.00045*t+.0008){mat=r.y;return t;} t+=max(r.x,.0004*t); if(t>tmx)break; }
+  return -1.;
+}
+float softSmall(vec3 p,vec3 d){ float t=.03,v=1.,m; for(int i=0;i<18;i++){ float h=mapSmall(p+d*t,m); v=min(v,.5+.5*h/(SR*1.6*t+.004)); if(v<.0||t>9.)break; t+=clamp(h,.03,.6);} return smoothstep(0.,1.,v); }
+float softK(vec3 p,vec3 d){ float t=.05,v=1.; for(int i=0;i<26;i++){ float h=min(mapK(p+d*t).x,1e3); if(p.y<3.&&t<4.){float m;h=min(h,mapFlora(p+d*t,m));} v=min(v,.5+.5*h/(SR*1.6*t+.004)); if(v<.0||t>22.)break; t+=clamp(h,.03,1.5);} return smoothstep(0.,1.,v); }
+float ggx(float nh,float a){float a2=a*a;float d=nh*nh*(a2-1.)+1.;return a2/(PI*d*d);}
+float archGlow(vec3 p,out float dpt,out float rim,out float hsz){ // buzun içindeki en yakın ışık gözü
+  vec3 q=vec3(dot(p,U),dot(p,V),dot(p,L)); float g=1e3; dpt=1e3; rim=1e3; hsz=1.;
+  for(int c=0;c<uNC;c++){ vec4 C=uC0[c],D=uC1[c]; if(length(q.xy-C.xy)-C.z>1.||q.z>C.w+4.||q.z<C.w-D.z-2.)continue;
+    for(int i=int(D.x);i<int(D.y);i++){ vec4 f=fan(i,q.xy); if(f.y>1.5)continue; g=min(g,abs(f.z)/D.w); rim=min(rim,abs(f.y)/D.w); dpt=min(dpt,max(uF1[i].y-q.z,0.)); hsz=D.w; } }
+  return g;
+}
+
+float track(vec2 w,float sd){ float cs=1.75,id=floor(w.y/cs),tr=0.; for(int k=-2;k<=2;k++){ float i2=id+float(k),sn=mod(i2,2.)<.5?1.:-1.; vec2 c=vec2(sn*1.25,(i2+.5)*cs+(h11(i2+sd)-.5)*.3),d=w-c; float r=length(d); 
+    float on=smoothstep(.06,.02,abs(r-2.45))*smoothstep(.55,.75,-d.x*sn/max(r,.01)); on=max(on,.8*smoothstep(.30,.16,length(d*vec2(1.4,.8)))); tr=max(tr,on);} return tr; }
+vec3 bounceCol(vec3 p,float mat){ // dolaylı ışık için ucuz yüzey
+  float sv=sunArch(p+vec3(0,.05,0)); float fr=smoothstep(.6,.3,sv); vec3 a=mat==0.?mix(vec3(.05,.036,.034),vec3(.74,.82,.80),fr):mat==2.?vec3(.62,.72,.70):vec3(.04);
+  return a*(vec3(.20,.24,.24)+SUN/PI*.16*sv*(mat==0.?1.:.3));
+}
+
+vec3 shade(vec3 p,vec3 rd,float t,float mat){
+  vec3 n=nrm(p,max(.0012,.0006*t)); vec3 v=-rd; if(dot(n,v)<0.)n=normalize(n-1.02*dot(n,v)*v*-1.*-1.);
+  vec2 q=ua(p.xz); float svA=sunArch(p+n*.02); float sv=svA,dyn=1.;
+  vec3 alb=vec3(.1); float ro=.7,F0=.04,spk=.5; vec3 trans=vec3(0),emit=vec3(0); float sss=0.;
+  if(mat<.5){
+    sv*=softSmall(p+vec3(0,.012,0),L);
+    if(t<160.)dyn=softK(p+vec3(0,.02,0),L);
+    float nz=fbm(q*vec2(1.1,.45)),nf=n2(q*vec2(9.,5.)),nb=fbm(q*vec2(.22,.05)+3.);
+    float ff=fbm(q*vec2(1.9,.6)+4.); float far=smoothstep(130.,320.,t); float fr=smoothstep(.60,.38,sv+far*(.10+.55*(fbm(q*vec2(.035,.012)+17.)-.45))+(nz-.5)*.30+(ff-.5)*.20+(nf-.5)*.03);
+    fr*=mix(1.,smoothstep(.05,.4,nb+.25),.35);
+    float wet=exp(-pow((sv-.52)/.25,2.))*smoothstep(400.,60.,t);
+    // kaya: rüzgârın taradığı bazalt
+    float st=fbm(q*vec2(1.7,.07)+nz*.7),st2=n2(q*vec2(7.,.35)+nz); vec3 rock=mix(vec3(.010,.009,.014),vec3(.052,.034,.036),smoothstep(.25,.75,st)); rock=mix(rock,vec3(.090,.050,.036),.45*smoothstep(.5,.8,nb)*st2); rock*=.6+.7*st2; { float wq=q.x+.35*n2(q*vec2(.8,.12)); float pk=n2(vec2(wq*7.,q.y*.45)),pk2=n2(vec2(wq*24.,q.y*2.2)); float gv=smoothstep(.30,.62,pk); rock*=mix(1.,.55+.75*gv,smoothstep(110.,20.,t)*(1.-.7*wet))*mix(1.,.82+.36*pk2,smoothstep(40.,10.,t)*(1.-wet)); float sp=h21(floor(q*vec2(9.,9.))); rock+=vec3(.10,.07,.055)*step(.990,sp)*smoothstep(50.,20.,t)*(1.-wet); }
+    vec3 frost=mix(vec3(.74,.83,.82),vec3(.97,.98,.95),nz); frost*=.90+.10*nf;
+    // beşik izleri: canlı iki ucunda dönerek yürür, kırağıda yay bırakır
+    float tr=0.; if(t<130.){ float bx=bord(p); tr=track(vec2(bx-.1,q.y),0.)*smoothstep(-.4,.5,bx);
+      vec2 a0=vec2(9.2,45.),a1=vec2(20.5,9.),ax=normalize(a1-a0); vec2 w=q-a0; float al0=dot(w,ax); float cx=dot(w,vec2(-ax.y,ax.x))+1.1*sin(al0*.11); if(al0>2.)tr=max(tr,track(vec2(cx,al0),40.)); tr*=smoothstep(130.,50.,t); }
+    fr*=1.-.62*tr;
+    alb=mix(rock,frost,fr); alb=mix(alb,alb*.45,wet*(1.-fr*.6));
+    ro=mix(mix(.66,.74,fr),.17,wet*(1.-.6*fr)); F0=.04; spk=mix(.012,.13,wet*(1.-.5*fr));
+    // kabartma
+    float e=.03+.0015*t; vec2 bq=q; float b0=.10*fbm(bq*vec2(1.8,.8))+.02*n2(bq*vec2(9.,4.)); float bx=.10*fbm((bq+vec2(e,0))*vec2(1.8,.8))+.02*n2((bq+vec2(e,0))*vec2(9.,4.)); float by=.10*fbm((bq+vec2(0,e))*vec2(1.8,.8))+.02*n2((bq+vec2(0,e))*vec2(9.,4.));
+    vec2 g=vec2(bx-b0,by-b0)/e*smoothstep(260.,20.,t)*(1.-.75*wet); g+=vec2(n2(q*vec2(7.,.5)+.1)-n2(q*vec2(7.,.5)-.4),.35*(n2(q*vec2(5.,3.)+7.1)-n2(q*vec2(5.,3.)+6.6)))*.38*(1.-fr)*(1.-wet)*smoothstep(60.,10.,t); n=normalize(n-vec3(Ug.x*g.x+Lg.x*g.y,0,Ug.y*g.x+Lg.y*g.y)*mix(1.5,.9,fr));
+  } else if(mat<1.5){ alb=vec3(.016,.014,.016); ro=.6; }
+  else if(mat<2.5){
+    float dp,rim,hsz; float g=archGlow(p,dp,rim,hsz); float sL=dot(p,L),sU=dot(p,U);
+    float st=.6*n2(vec2(sL*.11,sU*.02+dot(p,V)*.16))+.4*n3(p*vec3(.35,.16,.35)); float fl=n3(p*1.7);
+    vec3 cool=mix(vec3(.135,.255,.275),vec3(.52,.66,.64),smoothstep(.2,.85,st)); alb=cool*(.85+.25*fl); ro=.6; F0=.03; spk=.05;
+    n=normalize(n+.10*(vec3(n3(p*1.1),n3(p*1.1+9.),n3(p*1.1+17.))-.5)+.16*(vec3(n3(p*.5),n3(p*.5+9.),n3(p*.5+17.))-.5));
+    float dl=dp/(hsz*9.); float tn=exp(-g*4.5);
+    vec3 deepC=mix(vec3(.42,.085,.035),vec3(1.25,.46,.16),exp(-dl*.9)); deepC=mix(deepC,vec3(2.1,1.38,.78),exp(-dl*2.6));
+    emit=deepC*(tn*(.12+.95*exp(-dl*.75))+.16*exp(-g*1.5)*exp(-dl*.6))+vec3(.9,.55,.32)*.09*exp(-rim*1.6)*exp(-dl*.5);
+    alb*=.40+.60*smoothstep(0.,1.2,g);
+    float cap=smoothstep(.25,.95,n.y+(fl-.5)*.35+(n3(p*.22)-.5)*.4); alb=mix(alb,vec3(.80,.88,.87),cap*mix(.45,.85,smoothstep(.1,.8,hsz))); emit*=1.-.7*cap;
+  } else if(mat<3.5){ float fr=smoothstep(.15,-.2,dot(n,L)+(n3(p*9.)-.5)*.3); alb=mix(vec3(.06,.043,.04),vec3(.75,.82,.80),fr*step(.2,svA+.0)+0.); if(svA<.4)alb=mix(alb,vec3(.75,.82,.80),smoothstep(.0,.6,n.y+n3(p*6.)-.3)); sv*=softSmall(p+n*.02,L); dyn=softK(p+n*.02,L); ro=.7; }
+  else if(mat<4.5){ float fr=step(dot(n,L),0.); alb=mix(vec3(.018,.016,.018),vec3(.70,.78,.76),fr*smoothstep(.2,.7,n3(p*vec3(6.,9.,6.))+.35)); ro=.5; sv*=softSmall(p+n*.04,L); }
+  else if(mat>29.){ if(mat<30.5){alb=vec3(.80,.79,.74);trans=vec3(.9,.75,.55)*.2;} else {alb=vec3(.012);} }
+  else if(mat>19.&&mat<30.){ dyn=softK(p+n*.012+L*.06,L); if(mat<20.4){alb=vec3(.020,.012,.016);trans=vec3(.75,.16,.09)*.05;} else if(mat<20.9){alb=vec3(.60,.60,.55);trans=vec3(.9,.72,.5)*.25;} else {alb=vec3(.34,.07,.04);trans=vec3(1.,.25,.1)*.15;} ro=.55; }
+  else {
+    dyn=softK(p+n*.02+L*.05,L);
+    float nz=n3(p*14.),nl=n3(p*3.);
+    if(mat<10.1){ alb=mix(vec3(.23,.17,.14),vec3(.52,.44,.36),nl); alb*=.6+.4*nz; ro=.45; }
+    else if(mat<10.5){ alb=vec3(.30,.10,.07); ro=.4; }
+    else if(mat<11.5){ alb=vec3(.50,.10,.06); trans=vec3(1.,.22,.09)*1.0; ro=.35; }
+    else if(mat<12.5){ alb=vec3(.011,.010,.012); ro=.38; }
+    else if(mat<13.5){ alb=mix(vec3(.74,.75,.70),vec3(.60,.63,.63),nl); trans=vec3(.95,.80,.62)*.42; ro=.5; }
+    else if(mat<14.5){ alb=vec3(.03,.024,.024)*(.6+.8*nz); ro=.55; }
+    else if(mat<15.5){ alb=vec3(.62,.58,.50)*(.7+.4*nz); ro=.5; }
+    else if(mat<16.5){ alb=vec3(.16,.045,.035); ro=.4; trans=vec3(.8,.2,.1)*.25; }
+    else { alb=vec3(.85,.62,.30); ro=.3; trans=vec3(1.,.6,.25)*.6; }
+  }
+  // doğrudan güneş
+  if(mat>9.&&mat<19.){ int bi=0;float bb=1e3;for(int i=0;i<uNK;i++){vec4 K=uK0[i];vec2 cc=Ug*K.x+Lg*K.y;float dd=length(p-vec3(cc.x,uK1[i].w+K.z,cc.y))/K.z;if(dd<bb){bb=dd;bi=i;}} float kk;vec3 w=toK(p,bi,kk);
+    if(mat<10.1){ float an=atan((w.y-.22)/1.92,w.x/1.32); float sg=.5+.5*cos(an*34.); vec3 dors=mix(vec3(.10,.055,.050),vec3(.46,.40,.34),smoothstep(2.5,.5,an)); alb=dors*(.55+.65*sg)*(.75+.5*n3(w*22.)); float pit=smoothstep(.055,.03,length(vec2(w.z*.9+.11,(fract(an*34./6.2832)-.5)*.33))); alb=mix(alb,vec3(.012),pit); ro=.5; }
+    else if(mat<11.5&&mat>10.9){ float an=atan((w.y-.22)/1.92,w.x/1.32); float rr=length(w.xy/vec2(1.32,1.92)-vec2(0,.115)); float vn=abs(n2(vec2(an*9.,rr*7.))-.5); float g=smoothstep(.72,1.,rr); trans*=mix(vec3(.55,.30,.22),vec3(1.15,1.3,1.35),g)*(.45+.75*smoothstep(.0,.10,vn)); }
+    else if(mat>12.6&&mat<13.5){ vec2 f=w.xy-vec2(1.28,.22); float rr=length(f); float an=atan(f.y,f.x); alb=mix(vec3(.62,.30,.22),alb,smoothstep(.12,.62,rr)); alb*=.84+.16*smoothstep(.04,.16,abs(fract(an*36./6.2832)-.5)); alb=mix(alb,vec3(.50,.55,.56),smoothstep(1.28,1.5,rr)*.5); }
+    else if(mat>11.6&&mat<12.5){ alb=mix(vec3(.010,.009,.011),vec3(.05,.018,.016),smoothstep(.35,.0,length(w.xy-vec2(-1.2,.3)))); }
+  }
+  vec3 c=vec3(0); float ndl=max(dot(n,L),0.),s=sv*dyn; vec3 h=normalize(L+v); float nv=max(dot(n,v),.02);
+  c+=alb/PI*SUN*ndl*s;
+  float fh=F0+(1.-F0)*pow(1.-max(dot(h,v),0.),5.); float al2=max(ro*ro,.02);
+  c+=SUN*min(ggx(max(dot(n,h),0.),al2)*fh/(4.*max(nv,.2)),1.6)*smoothstep(0.,.1,ndl)*s*spk;
+  c+=trans/PI*SUN*(max(dot(-n,L),0.)*.55+.25*pow(max(dot(rd,L),0.),5.))*s;
+  // gökyüzü + tek sekme
+  { float r1=rnd(),r2=rnd()*6.2832; vec3 tt=normalize(abs(n.y)<.9?cross(n,vec3(0,1,0)):cross(n,vec3(1,0,0))),bb=cross(n,tt); vec3 d=normalize(sqrt(r1)*(cos(r2)*tt+sin(r2)*bb)+sqrt(1.-r1)*n);
+    float mt; float tm=march(p+n*(.02+.001*t),d,5.+.25*t,mt,22); vec3 Li;
+    if(tm>0.){ Li=bounceCol(p+d*tm,mt);} else Li=d.y>0.?skyBase(d):vec3(.10,.10,.09);
+    c+=alb*Li*vec3(1.12,1.,.92)*1.8; vec3 bt=-d; if(dot(trans,trans)>0.)c+=trans*.5*(bt.y>0.?skyBase(bt):vec3(.1)); }
+  { vec3 rf=reflect(rd,n); rf.y=abs(rf.y); float fr=F0+(1.-F0)*pow(1.-nv,5.); c+=skyBase(normalize(rf+.35*ro*(vec3(rnd(),rnd(),rnd())-.5)))*fr*pow(1.-ro,2.5)*mix(.35,1.,svA)*(mat>1.5&&mat<2.5?.22:1.); }
+  return c+emit;
+}
+
+void main(){
+  ivec2 ip=ivec2(gl_FragCoord.xy); rs=uint(ip.x)*1973u+uint(ip.y)*9277u+uint(uFrame)*26699u+1u; rnd();rnd();
+  vec2 j=vec2(rnd(),rnd()); vec2 uv=((gl_FragCoord.xy-.5+j)*2.-uRes)/uRes.y*uTan;
+  vec3 rd=normalize(uBasis*vec3(uv,1.)),ro=uCam;
+  if(uLens.x>0.){ vec3 f=ro+rd*(uLens.y/dot(rd,uBasis[2])); float a=rnd()*6.2832,r=sqrt(rnd())*uLens.x; ro+=uBasis*vec3(cos(a)*r,sin(a)*r,0.); rd=normalize(f-ro); }
+  float mat,tmx=2600.; float t=march(ro,rd,tmx,mat,uMaxStep); vec3 col; float te=t;
+  if(t>0.)col=shade(ro+rd*t,rd,t,mat);
+  else { te=1700.; col=sky(rd); float mu=dot(rd,L); float ds=acos(clamp(mu,-1.,1.))/.0118; if(ds<1.)col+=vec3(1.,.80,.52)*30.*sqrt(1.-ds*ds*.75); }
+  // hava: gölgenin içindeki ve dışındaki ışık
+  const int NV=14; float T=1.; vec3 I=vec3(0); float mu=dot(rd,L); float ph=.15*hg(mu,.74)+.22*hg(mu,.30); float pt=0.; float off=rnd();
+  vec3 amb=mix(skyBase(normalize(vec3(rd.x,.14,rd.z))),vec3(.17,.27,.30),.55)*.42;
+  for(int i=0;i<NV;i++){ float x=(float(i)+off)/float(NV); float tt=te*x*x; float x1=(float(i)+1.)/float(NV); float nt=te*x1*x1; float dt=nt-pt; pt=nt;
+    vec3 p=ro+rd*tt; float sg=sigma(p); float a=exp(-sg*dt); vec3 S=SUN*vec3(1.,.93,.85)*ph*sunArch(p)*.24+amb; I+=T*(1.-a)*S; T*=a; }
+  col=(t>0.)?col*T+I:col*mix(1.,T,.5)+I*.55;
+  if(any(isnan(col))||any(isinf(col)))col=vec3(0); col=min(col,vec3(60.));
+  o0=vec4(col,1.); o1=vec4(te,0,0,1.);
+}
+</script>
+
+<!-- ===================== SON İŞLEM ===================== -->
+<script id="down" type="x-glsl">
+uniform sampler2D A; uniform vec2 uPx; uniform int uFirst; out vec4 o;
+vec3 s(vec2 p){vec4 c=texture(A,p); return uFirst==1?min(c.rgb/max(c.a,1.),vec3(14.)):c.rgb;}
+void main(){vec2 p=gl_FragCoord.xy*uPx; vec2 h=uPx*.25; 
+  vec3 c=s(p)*4.+s(p+vec2(h.x,h.y)*2.)+s(p-vec2(h.x,h.y)*2.)+s(p+vec2(h.x,-h.y)*2.)+s(p-vec2(h.x,-h.y)*2.); o=vec4(c/8.,1);}
+</script>
+<script id="up" type="x-glsl">
+uniform sampler2D A,B; uniform vec2 uPx; uniform float uK; out vec4 o;
+void main(){vec2 p=gl_FragCoord.xy*uPx; vec2 h=uPx; vec3 c=texture(A,p).rgb*4.;
+  c+=(texture(A,p+vec2(h.x,0)).rgb+texture(A,p-vec2(h.x,0)).rgb+texture(A,p+vec2(0,h.y)).rgb+texture(A,p-vec2(0,h.y)).rgb)*2.;
+  c+=texture(A,p+h).rgb+texture(A,p-h).rgb+texture(A,p+vec2(h.x,-h.y)).rgb+texture(A,p-vec2(h.x,-h.y)).rgb;
+  o=vec4(c/16.*uK+texture(B,p).rgb,1);}
+</script>
+<script id="grade" type="x-glsl">
+uniform sampler2D A,Lo,Bl,D; uniform vec2 uPx; uniform float uExp; out vec4 o;
+vec3 agx(vec3 v){ mat3 m=mat3(.842479062253094,.0423282422610123,.0423756549057051,.0784335999999992,.878468636469772,.0784336,.0792237451477643,.0791661274605434,.879142973793104);
+  v=m*v; v=clamp((log2(max(v,1e-6))+12.47393)/(4.026069+12.47393),0.,1.);
+  vec3 x2=v*v,x4=x2*x2; v=15.5*x4*x2-40.14*x4*v+31.96*x4-6.868*x2*v+.4298*x2+.1191*v-.00232;
+  float l=dot(v,vec3(.2126,.7152,.0722)); v=pow(max(v,0.),vec3(1.28)); v=l+1.0*(v-l); l=dot(v,vec3(.2126,.7152,.0722)); v=max(l+1.32*(v-l),0.);
+  mat3 mi=mat3(1.19687900512017,-.0528968517574562,-.0529716355144438,-.0980208811401368,1.15190312990417,-.0980434501171241,-.0990297440797205,-.0989611768448433,1.15107367264116);
+  return clamp(mi*v,0.,1.); }
+void main(){ vec2 p=gl_FragCoord.xy*uPx; vec4 a=texture(A,p),l=texture(Lo,p); vec3 c=a.a>0.?a.rgb/a.a:l.rgb/max(l.a,1.);
+  vec3 b=texture(Bl,p).rgb; c=mix(c,b/5.,.13);
+  vec2 q=p*2.-1.; c*=1.-.34*smoothstep(.45,1.5,length(q*vec2(.95,.8)-vec2(.08,0.))); c*=1.-.16*smoothstep(.35,1.,q.y)*smoothstep(.9,.1,abs(q.x-.12)*.6+.2);
+  c=agx(c*uExp);
+  float lum=dot(c,vec3(.2126,.7152,.0722));
+  c=mix(c,c*vec3(.93,1.02,1.03),.6*(1.-smoothstep(.0,.45,lum))); c=mix(c,c*vec3(1.045,.995,.925),smoothstep(.42,.92,lum));
+  c=mix(c,c*c*(3.-2.*c),.38); 
+  o=vec4(c,a.a>0.?texture(D,p).r/max(texture(D,p).a,1.):800.); }
+</script>
+<script id="st" type="x-glsl">
+uniform sampler2D A; uniform vec2 uPx; out vec4 o;
+void main(){ ivec2 p=ivec2(gl_FragCoord.xy),m=textureSize(A,0)-1;
+#define T(x,y) texelFetch(A,clamp(p+ivec2(x,y),ivec2(0),m),0).rgb
+  vec3 sx=(T(1,-1)+2.*T(1,0)+T(1,1)-T(-1,-1)-2.*T(-1,0)-T(-1,1))*.25, sy=(T(-1,1)+2.*T(0,1)+T(1,1)-T(-1,-1)-2.*T(0,-1)-T(1,-1))*.25;
+  o=vec4(dot(sx,sx),dot(sy,sy),dot(sx,sy),1); }
+</script>
+<script id="blur" type="x-glsl">
+uniform sampler2D A; uniform vec2 uDir; out vec4 o;
+void main(){ ivec2 p=ivec2(gl_FragCoord.xy),m=textureSize(A,0)-1; vec4 s=vec4(0); float w=0.; for(int i=-6;i<=6;i++){float g=exp(-float(i*i)/14.); s+=g*texelFetch(A,clamp(p+ivec2(uDir)*i,ivec2(0),m),0); w+=g;} o=s/w; }
+</script>
+<script id="akf" type="x-glsl">
+uniform sampler2D A,S; uniform vec2 uPx; uniform float uR; out vec4 o;
+void main(){ vec2 p=gl_FragCoord.xy*uPx; vec4 src=texture(A,p); vec3 g=texture(S,p).xyz; 
+  float l=.5*(g.x+g.y+sqrt(max((g.x-g.y)*(g.x-g.y)+4.*g.z*g.z,0.))),l2=.5*(g.x+g.y-sqrt(max((g.x-g.y)*(g.x-g.y)+4.*g.z*g.z,0.)));
+  vec2 t=vec2(l-g.x,-g.z); t=length(t)>1e-7?normalize(t):vec2(0,1); float An=(l+l2)>1e-9?(l-l2)/(l+l2):0.;
+  float z=src.a; float R=uR*mix(.62,1.25,smoothstep(8.,400.,z)); 
+  float a=R*clamp((1.+An)/1.,.6,1.9),b=R*clamp(1./(1.+An),.45,1.); float ca=t.x,sa=t.y; mat2 Rm=mat2(ca,-sa,sa,ca); // dünya -> elips
+  ivec2 mx=ivec2(sqrt(a*a*ca*ca+b*b*sa*sa),sqrt(a*a*sa*sa+b*b*ca*ca)); 
+  vec4 m[8]; vec3 s[8]; for(int k=0;k<8;k++){m[k]=vec4(0);s[k]=vec3(0);}
+  for(int y=-mx.y;y<=mx.y;y++)for(int x=-mx.x;x<=mx.x;x++){ vec2 d=vec2(x,y); vec2 v=Rm*d/vec2(a,b); float r2=dot(v,v); if(r2>1.)continue; vec3 c=texture(A,p+d*uPx).rgb; float w0=exp(-3.*r2); v*=1.0;
+    float an=atan(v.y,v.x)/6.2831853*8.+8.; for(int k=0;k<8;k++){ float da=abs(mod(an-float(k)+4.,8.)-4.); float w=r2<1e-4?.125:max(1.-da,0.); if(w>0.){w*=w0; m[k]+=vec4(c*w,w); s[k]+=c*c*w;} } }
+  vec4 O=vec4(0); for(int k=0;k<8;k++){ if(m[k].a<1e-5)continue; vec3 c=m[k].rgb/m[k].a; vec3 v=abs(s[k]/m[k].a-c*c); float sg=sqrt(v.r+v.g+v.b); float w=1./(1.+pow(sg*95.,6.)); O+=vec4(c*w,w); }
+  o=vec4(O.a>1e-18?O.rgb/O.a:src.rgb,z); o.rgb=mix(src.rgb,o.rgb,mix(.80,.96,smoothstep(10.,200.,z))); }
+</script>
+<script id="final" type="x-glsl">
+uniform sampler2D A,S; uniform vec2 uPx; out vec4 o;
+void main(){ vec2 p=gl_FragCoord.xy*uPx; vec3 c=texture(A,p).rgb; 
+  vec3 bl=(texture(A,p+vec2(1.2,0)*uPx).rgb+texture(A,p-vec2(1.2,0)*uPx).rgb+texture(A,p+vec2(0,1.2)*uPx).rgb+texture(A,p-vec2(0,1.2)*uPx).rgb)*.25; c+=(c-bl)*.55;
+  vec2 fc=gl_FragCoord.xy; float cv=n2(fc*.55)*.5+n2(fc*vec2(.9,.32))*.5-.5; float gr=h21(fc)-.5; c*=1.+.035*cv; c+=gr*.012;
+  o=vec4(pow(clamp(c,0.,1.),vec3(1.)),1); }
+</script>
+
+<script>
+'use strict';
+(()=>{
+const Q=new URLSearchParams(location.search), $=id=>document.getElementById(id), msg=$('msg');
+const st=window.__st={done:false,err:null,spp:0};
+const fail=m=>{st.err=m;msg.hidden=false;msg.textContent=m;console.error(m);};
+const cv=$('c'); const gl=cv.getContext('webgl2',{antialias:false,alpha:false,preserveDrawingBuffer:true,powerPreference:'high-performance'});
+if(!gl){fail('Bu resim WebGL2 ile çiziliyor; tarayıcın desteklemiyor.');return;}
+if(!gl.getExtension('EXT_color_buffer_float')){fail('Bu ekran kartı resmin gerektirdiği kayan noktalı yüzeyleri desteklemiyor.');return;}
+const FB=!!gl.getExtension('EXT_float_blend'), ACC=FB?'32':'16';
+cv.addEventListener('webglcontextlost',e=>{e.preventDefault();fail('Ekran kartı bağlantısı koptu; sayfayı yenile.');});
+gl.getExtension('OES_texture_float_linear');
+
+const W=+(Q.get('w')||Math.min(2560,Math.max(2048,Math.round(cv.clientWidth*(devicePixelRatio||1)/2)*2))), H=W/2; cv.width=W;cv.height=H;
+const SPP=+(Q.get('spp')||(FB?160:80));
+
+// ---------- program ----------
+const src=id=>$(id).textContent.trim();
+const par=gl.getExtension('KHR_parallel_shader_compile');
+function start(id){ const mk=(t,x)=>{const sh=gl.createShader(t);gl.shaderSource(sh,x);gl.compileShader(sh);return sh;};
+  const p=gl.createProgram(),v=mk(gl.VERTEX_SHADER,src('vs')),f=mk(gl.FRAGMENT_SHADER,src('common')+'\n'+src(id)); gl.attachShader(p,v);gl.attachShader(p,f);gl.linkProgram(p); return {p,f}; }
+async function finish(id,o){ while(par&&!gl.getProgramParameter(o.p,par.COMPLETION_STATUS_KHR))await new Promise(r=>setTimeout(r,30));
+  if(!gl.getProgramParameter(o.p,gl.LINK_STATUS)){fail('Çizim programı derlenemedi ('+id+').\n'+(gl.getShaderInfoLog(o.f)||gl.getProgramInfoLog(o.p)||''));return null;}
+  const u={},n=gl.getProgramParameter(o.p,gl.ACTIVE_UNIFORMS);for(let i=0;i<n;i++){const a=gl.getActiveUniform(o.p,i);u[a.name.replace('[0]','')]=gl.getUniformLocation(o.p,a.name);} return {p:o.p,u}; }
+const tex=(w,h,ifmt,fmt,type,filt)=>{const t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl.texImage2D(gl.TEXTURE_2D,0,ifmt,w,h,0,fmt,type,null);for(const k of [gl.TEXTURE_MIN_FILTER,gl.TEXTURE_MAG_FILTER])gl.texParameteri(gl.TEXTURE_2D,k,filt);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);return t;};
+function rt(w,h,kinds){const f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,f);const t=kinds.map((k,i)=>{const x=k==='32'?tex(w,h,gl.RGBA32F,gl.RGBA,gl.FLOAT,gl.LINEAR):k==='16'?tex(w,h,gl.RGBA16F,gl.RGBA,gl.HALF_FLOAT,gl.LINEAR):tex(w,h,gl.RGBA8,gl.RGBA,gl.UNSIGNED_BYTE,gl.LINEAR);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,x,0);return x;});gl.drawBuffers(t.map((_,i)=>gl.COLOR_ATTACHMENT0+i));gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);return {f,t,w,h};}
+
+// ---------- dünya verisi ----------
+const D=Math.PI/180, EL=9*D, AZ=4*D;
+const L=[Math.sin(AZ)*Math.cos(EL),Math.sin(EL),Math.cos(AZ)*Math.cos(EL)];
+const Ux=[L[2],0,-L[0]],ul=Math.hypot(...Ux),U=Ux.map(x=>x/ul);
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const norm=a=>{const l=Math.hypot(...a);return a.map(x=>x/l);};
+const V=cross(L,U), Lg=[Math.sin(AZ),Math.cos(AZ)], Ug=[Math.cos(AZ),-Math.sin(AZ)];
+let seed=1; const R=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;};
+const casters=[];
+const gv=s=>-s*Math.tan(EL);
+// Büyük Gölgelik: güneşin kenarına büyümüş liken plakaları
+casters.push({s:560,hs:2.6,fans:[
+  {u:92,v:-34,phi:-64,R:104,al:74,len:150},  // 0: sınırı çizen plaka
+  {u:128,v:-96,phi:-3,R:112,al:72,len:190},
+  {u:122,v:6,phi:8,R:86,al:78,len:120},
+  {u:160,v:-40,phi:60,R:74,al:72,len:110},
+  {u:78,v:-58,phi:-108,R:46,al:80,len:90},
+  {u:70,v:26,phi:-34,R:52,al:80,len:70},
+]});
+const push=(s,u,H,f)=>casters.push({s,hs:H*.016,fans:f});
+function plate(s,u,H,sd,len,lean=0){ seed=sd*7919+13; const v=gv(s)-H*.04; push(s,u,H,[{u,v,phi:lean,R:H,al:34+10*R(),len},{u:u+H*.06,v:v+H*.10,phi:lean+62*(R()<.5?-1:1),R:H*.46,al:74,len:len*.6},{u,v:v+H*.48,phi:lean-52*(R()<.5?-1:1),R:H*.40,al:70,len:len*.5}]); }
+function hedge(s,u,H,sd,len,n,sp){ seed=sd*7919+13; const f=[]; for(let i=0;i<n;i++){const h=H*(.5+.6*R());f.push({u:u+(i-(n-1)/2)*sp*H+(R()-.5)*H*.2,v:gv(s)-h*.05,phi:(R()-.5)*30,R:h,al:58+24*R(),len:len*(.6+.6*R())});} push(s,u,H,f); }
+function crest(s,u,H,sd,len,dir=1){ seed=sd*7919+13; const v=gv(s)-H*.04; push(s,u,H,[{u,v,phi:dir*4,R:H*.66,al:70,len},{u:u+dir*H*.05,v:v+H*.40,phi:dir*18,R:H*.56,al:74,len:len*.8},{u:u-dir*H*.16,v:v+H*.28,phi:-dir*66,R:H*.46,al:74,len:len*.62},{u:u+dir*H*.2,v:v+H*.16,phi:dir*80,R:H*.40,al:70,len:len*.7}]); }
+crest(250,-132,60,3,150,-1);
+plate(400,-84,62,8,120,-6);
+hedge(300,-62,15,2,50,3,1.0);
+plate(172,-63,17,5,44,4);
+hedge(108,-44,6.4,11,14,2,1.25);
+crest(820,-300,165,21,260,-1);
+plate(1150,-170,180,9,200,5);
+plate(1500,-640,260,14,240,-4);
+crest(1500,690,250,6,240,1);
+plate(640,252,46,12,90,7);
+let nf=0; const SHIFT=+(Q.get('shift')||0); casters[0].fans.forEach(f=>f.u+=SHIFT);
+const F0=[],F1=[],C0=[],C1=[];
+casters.forEach((c,ci)=>{ const a=nf; let mu=0,mv=0; c.fans.forEach(f=>{mu+=f.u+Math.sin(f.phi*D)*f.R*.5;mv+=f.v+Math.cos(f.phi*D)*f.R*.5;}); mu/=c.fans.length;mv/=c.fans.length; let r=0;
+  c.fans.forEach((f,i)=>{ r=Math.max(r,Math.hypot(f.u-mu,f.v-mv)+f.R*1.07); F0.push(f.u,f.v,f.phi*D,f.R); F1.push(f.al*D,c.s+(i%3)*f.R*.012,f.len,ci*1.37+i*.73+.11); nf++; });
+  if(nf>64)throw new Error('yelpaze sınırı');
+  C0.push(mu,mv,r,c.s); C1.push(a,nf,Math.max(...c.fans.map(f=>f.len))*1.2,c.hs); });
+const K0=[],K1=[]; const kr=(u,a,k,yaw,lean=0,f=0,y=0)=>{K0.push(u,a,k,yaw*D);K1.push(lean,K0.length*.37+.2,f,y);};
+const h11=p=>{const fr=x=>x-Math.floor(x);p=fr(p*.1031);p*=p+33.33;p*=p+p;return fr(p);};
+function outline(i,u,v){ const ou=F0[i*4],ov=F0[i*4+1],ph=F0[i*4+2],Rr=F0[i*4+3],al=F1[i*4],sd=F1[i*4+3]; let x=u-ou,y=v-ov; const c=Math.cos(ph),s=Math.sin(ph); [x,y]=[c*x-s*y,s*x+c*y]; if(i!==0){const x0=x,y0=y; x=x0+Rr*.03*Math.sin(y0/Rr*8+sd*5); y=y0+Rr*.03*Math.sin(x0/Rr*9+sd*3);} const r=Math.hypot(x,y),th=Math.atan2(x,y); const n=2+Math.floor(3*h11(sd+1)); const bf=i===0?0:1,tn=Math.min(Math.abs(th)/al,1.3),sc=Math.abs(Math.sin(th/al*Math.PI*.5*n+sd*6)); let Re=Rr*(1-.14*bf*(1-Math.sqrt(sc)))*(1-.30*tn*tn)*(1-.05*bf*Math.sin(th*2.3+sd*9)); const cl=th-al*(h11(sd+2)-.5)*.9; Re*=1-.36*bf*Math.exp(-cl*cl*(1400/(1+Rr*.05))); const dO=r-Re,dA=r*Math.sin(Math.max(-1.57,Math.min(1.57,Math.abs(th)-al))),kk=Rr*.1,hd=Math.max(0,Math.min(1,.5+.5*(dO-dA)/kk)); return dA*(1-hd)+dO*hd+kk*hd*(1-hd); }
+// yerde a uzaklığında gölge sınırının u'su
+const border=a=>{const v=-a*Math.sin(EL);for(let u=-30;u<40;u+=.05)if(outline(0,u,v)<0)return u;return 0;};
+st.border=[10,14,18,24,32,45,60,80,110,150].map(a=>[a,+border(a).toFixed(2)]);
+const onB=(a,k,yaw,lean,roll,du=0)=>kr(border(a)+du,a,k,yaw,lean,roll);
+onB(20.6,1.14,18,-.25,0); onB(25.4,.6,-20,.3,.10,1.9); onB(28.2,.98,-16,.2,-.11); onB(31.2,.92,22,0,0,-.2); onB(37.5,1.12,-8,.3,.12); onB(45,.86,14,-.2,0,.3); onB(48,1.04,-18,.1,-.09); onB(59,1.1,6,0,.1); onB(66,.62,10,0,0,.3); onB(70,1.02,-8,.2,0); onB(84,1,12,0,-.1); onB(99,1.1,-6,0,0); onB(104,.95,10,0,.1); onB(124,1.05,0,0,0); onB(150,1,0,0,0);
+kr(-14.2,33,.74,14,0,0); kr(-19.5,47,.95,-14,.1,.11); kr(-31,62,.95,6,0,0); kr(-28,78,1,20,0,-.1); kr(-46,92,1.05,0,0,0); kr(7.2,46,.9,30,0,.10); kr(10.4,50.5,1.02,6,0,0);
+
+// sırt yolları: çatının güneşe koşut kenarında yürüyenler
+function onRidge(ci,fi,th,ds,k,yaw){ const i=C1[ci*4]+fi, ou=F0[i*4],ov=F0[i*4+1],ph=F0[i*4+2]; let r=F0[i*4+3]*1.3; const d=th*Math.PI/180+ph; let u,v; for(;r>0;r-=.05){u=ou+Math.sin(d)*r;v=ov+Math.cos(d)*r;if(outline(i,u,v)<0)break;} const sp=F1[i*4+1]-ds; const w=[0,1,2].map(j=>U[j]*u+V[j]*v+L[j]*sp); kr(w[0]*Ug[0]+w[2]*Ug[1],w[0]*Lg[0]+w[2]*Lg[1],k,yaw,0,0,w[1]-.05); }
+[[1,1,-14,10],[1,1,2,5],[1,1,14,16],[1,1,30,7],[1,0,44,12]].forEach(([c,f,th,ds],i)=>onRidge(c,f,th,ds,1.05,(i%2?8:-8)));
+const SP=[]; seed=4242; for(let i=0;i<22;i++){ const t=(i+.5)/22, sd=70+420*t*t, v=3+34*t+20*R()-5, u=-8-2*t+(R()-.5)*(5+18*t); const p=[0,1,2].map(j=>U[j]*u+V[j]*v+L[j]*sd); if(p[1]<5.5)p[1]=5.5+3*R(); SP.push(p[0],p[1],p[2],.5+1.9*R()*(.5+t)); }
+
+// ---------- levhalar ----------
+const PL=[
+ {ad:'Sınır',yaw:0,pitch:2.4,fov:34,ap:.010,foc:22,
+  yazi:'Yıldızına hep aynı yüzünü gösteren bir gezegenin alacakaranlık kuşağı. Güneş hiç kıpırdamaz, gölgeler de. Bu yüzden gölgede kalan toprak kırağı tutup beyazlar, ışık alan toprak kararır. Yaşam yalnız ikisinin arasındaki çizgide vardır.'},
+ {ad:'Canlılar',yaw:-12.2,pitch:-9.2,fov:12.5,ap:.030,foc:21.5,
+  yazi:'Besinleri ısı farkıdır: kara pedler güneşe, ak yelpaze geceye bakar, aradaki kızıl zarda ısı akar. Başları, ön yüzleri, bacakları yok; iki uçları üstünde sırayla dönerek yürür, kırağıda yay izleri bırakırlar. Ortadaki sarkaç hem duyu hem el.'},
+ {ad:'Sırt yolları',yaw:-22.4,pitch:6.4,fov:13.2,ap:.02,foc:110,
+  yazi:'Yapılar yığılmaz, gölgelenir: güneşe ince bir kalkan dikilir, arkasındaki gölge yüzyıllar içinde buza dönüşür. Bina, gölgenin katılaşmış hâlidir; bu yüzden her çatı ve her sokak güneşi gösterir. Kalkan yırtılırsa ev erir.'},
+ {ad:'Büyük Gölgelik',yaw:14.6,pitch:8.6,fov:20,ap:.01,foc:400,
+  yazi:'Kalkandaki her göz, buzun içinde güneşe açılan düz bir sokak eritir. Kent plan çizilerek değil, delik delik ışık verilerek kurulur. Halkalar büyüme kuşaklarıdır; en uzun buz, en yaşlı halkanın arkasındadır.'},
+];
+let cam,basis;
+function setPlate(i){ cam={pos:[0,5.0,0],...PL[i]}; ['yaw','pitch','fov','ap','foc'].forEach(k=>{if(Q.has(k))cam[k]=+Q.get(k);}); if(Q.has('pos'))cam.pos=Q.get('pos').split(',').map(Number);
+  const fw=[Math.sin(cam.yaw*D)*Math.cos(cam.pitch*D),Math.sin(cam.pitch*D),Math.cos(cam.yaw*D)*Math.cos(cam.pitch*D)], r=norm(cross([0,1,0],fw)), up=cross(fw,r); basis=new Float32Array([...r,...up,...fw]); }
+
+// ---------- kur ----------
+const P={};
+gl.bindVertexArray(gl.createVertexArray());
+const LW=W>>2,LH=H>>2; const acc=rt(W,H,[ACC,ACC]), low=rt(LW,LH,[ACC,ACC]);
+const NB=6,bd=[],bu=[]; for(let i=0,w=W>>1,h=H>>1;i<NB;i++,w=Math.max(2,w>>1),h=Math.max(2,h>>1)){bd.push(rt(w,h,['16']));bu.push(rt(w,h,['16']));}
+const ldr=rt(W,H,['16']),s1=rt(W,H,['16']),s2=rt(W,H,['16']),kw=rt(W,H,['16']);
+const bind=(pr,target,tx={})=>{gl.useProgram(pr.p);gl.bindFramebuffer(gl.FRAMEBUFFER,target?target.f:null);gl.viewport(0,0,target?target.w:W,target?target.h:H);let i=0;for(const k in tx){gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,tx[k]);gl.uniform1i(pr.u[k],i++);}};
+const tri=()=>gl.drawArrays(gl.TRIANGLES,0,3);
+function world(target,frame,x,y,w,h,steps){ const p=P.world,u=p.u; bind(p,target);
+  gl.uniform2f(u.uRes,target.w,target.h);gl.uniform1i(u.uFrame,frame);gl.uniform1i(u.uMaxStep,steps);gl.uniform3fv(u.uCam,cam.pos);gl.uniformMatrix3fv(u.uBasis,false,basis);gl.uniform1f(u.uTan,Math.tan(cam.fov*D/2));gl.uniform2f(u.uLens,cam.ap,cam.foc);
+  gl.uniform3fv(u.L,L);gl.uniform3fv(u.U,U);gl.uniform3fv(u.V,V);gl.uniform2fv(u.Lg,Lg);gl.uniform2fv(u.Ug,Ug);
+  gl.uniform4fv(u.uF0,F0);gl.uniform4fv(u.uF1,F1);gl.uniform4fv(u.uC0,C0);gl.uniform4fv(u.uC1,C1);gl.uniform1i(u.uNC,casters.length);gl.uniform1i(u.uNK,K0.length/4);gl.uniform1i(u.uBF,0);gl.uniform4fv(u.uS,SP);gl.uniform1i(u.uNS,SP.length/4);gl.uniform4fv(u.uK0,K0);gl.uniform4fv(u.uK1,K1);
+  gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.enable(gl.SCISSOR_TEST);gl.scissor(x,y,w,h);tri();gl.disable(gl.SCISSOR_TEST);gl.disable(gl.BLEND); }
+function post(useLow){
+  let p=P.down,a=useLow?low.t[0]:acc.t[0]; for(let i=0;i<NB;i++){bind(p,bd[i],{A:a});gl.uniform2f(p.u.uPx,1/bd[i].w,1/bd[i].h);gl.uniform1i(p.u.uFirst,i===0?1:0);tri();a=bd[i].t[0];}
+  p=P.up; a=bd[NB-1].t[0]; for(let i=NB-2;i>=0;i--){bind(p,bu[i],{A:a,B:bd[i].t[0]});gl.uniform2f(p.u.uPx,1/bu[i].w,1/bu[i].h);gl.uniform1f(p.u.uK,1.);tri();a=bu[i].t[0];}
+  p=P.grade;bind(p,ldr,{A:acc.t[0],Lo:low.t[0],Bl:bu[0].t[0],D:acc.t[1]});gl.uniform2f(p.u.uPx,1/W,1/H);gl.uniform1f(p.u.uExp,+(Q.get('exp')||1.95));tri();
+  p=P.st;bind(p,s1,{A:ldr.t[0]});gl.uniform2f(p.u.uPx,1/W,1/H);tri();
+  p=P.blur;bind(p,s2,{A:s1.t[0]});gl.uniform2f(p.u.uDir,1,0);tri();bind(p,s1,{A:s2.t[0]});gl.uniform2f(p.u.uDir,0,1);tri();
+  p=P.akf;bind(p,kw,{A:ldr.t[0],S:s1.t[0]});gl.uniform2f(p.u.uPx,1/W,1/H);gl.uniform1f(p.u.uR,+(Q.get('kr')||W/2400*5));tri();
+  p=P.final;bind(p,null,{A:kw.t[0],S:s1.t[0]});gl.uniform2f(p.u.uPx,1/W,1/H);tri();
+}
+window.__png=()=>{post(false);return cv.toDataURL('image/png');};
+
+// ---------- ilerlemeli çizim: önce kaba leke, sonra karo karo ayrıntı ----------
+const TX=12,TY=6,tw=Math.ceil(W/TX),th=Math.ceil(H/TY); let tile=0,pass=0,lowN=0,perFrame=1,last=0,lastPost=0,raf=0;
+const order=[...Array(TX*TY).keys()].sort((a,b)=>{const f=i=>Math.hypot((i%TX)-TX*.5,((i/TX|0)-TY*.45)*1.6);return f(a)-f(b);});
+function tick(now){
+  const dt=now-last;last=now;
+  if(lowN<6){world(low,lowN++,0,0,LW,LH,140);post(true);msg.hidden=true;raf=requestAnimationFrame(tick);return;}
+  if(dt<26)perFrame=Math.min(perFrame*1.2+.2,TX*TY*2);else if(dt>45)perFrame=Math.max(1,perFrame*.6);
+  for(let k=0;k<Math.max(1,perFrame|0)&&pass<SPP;k++){const i=order[tile];world(acc,pass+100,(i%TX)*tw,(i/TX|0)*th,tw,th,220);if(++tile>=TX*TY){tile=0;pass++;st.spp=pass;}}
+  gl.flush();
+  if(now-lastPost>(pass<4?220:900)||pass>=SPP){post(pass<1);lastPost=now;}
+  if(pass>=SPP){st.done=true;return;}
+  raf=requestAnimationFrame(tick);
+}
+function show(i){ cancelAnimationFrame(raf); setPlate(i); for(const t of [acc,low]){gl.bindFramebuffer(gl.FRAMEBUFFER,t.f);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);} tile=pass=lowN=0;perFrame=1;st.done=false;st.spp=0;last=performance.now();lastPost=0;
+  $('cap').innerHTML='<h1>Beyaz Gölge</h1> · <b>'+PL[i].ad+'.</b> '+PL[i].yazi; [...$('nav').children].forEach((b,k)=>b.setAttribute('aria-pressed',k===i)); raf=requestAnimationFrame(tick); }
+PL.forEach((pl,i)=>{const b=document.createElement('button');b.type='button';b.textContent=pl.ad;b.onclick=()=>P.final&&show(i);$('nav').append(b);});
+addEventListener('keydown',e=>{const i=+e.key-1;if(PL[i]&&P.final&&!e.ctrlKey&&!e.metaKey&&!e.altKey)show(i);});
+const full=()=>document.fullscreenElement?document.exitFullscreen():cv.requestFullscreen?.(); cv.onclick=full; cv.onkeydown=e=>{if(e.key==='Enter')full();};
+(async()=>{ await new Promise(r=>requestAnimationFrame(()=>setTimeout(r,0))); const ids=['world','down','up','grade','st','blur','akf','final'],o=ids.map(start); for(let k=0;k<ids.length;k++){const q=await finish(ids[k],o[k]);if(!q)return;P[ids[k]]=q;} show(Math.max(0,Math.min(PL.length-1,(+(Q.get('levha')||1))-1))); })();
+})();
+</script>
+</body>
+</html>
